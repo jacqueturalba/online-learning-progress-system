@@ -18,7 +18,23 @@ async function api(url: string, init: RequestInit = {}) {
   const res = await fetch(url, { credentials: 'same-origin', ...init, headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrf(), ...init.headers } });
   const body = await res.json().catch(() => ({})); if (!res.ok) throw new Error(body.message || Object.values(body.errors || {}).flat()[0] as string || 'Something went wrong.'); return body;
 }
-async function load() { loading.value = true; try { user.value = (await api('/api/me')).user; categories.value = user.value.role === 'student' ? (await api('/api/learning')).categories : []; } catch { user.value = null; } finally { loading.value = false; } }
+async function load() {
+    loading.value = true;
+
+    try {
+        const response = await api('/api/me');
+        user.value = response.user;
+
+        categories.value = user.value?.role === 'student'
+            ? (await api('/api/learning')).categories
+            : [];
+    } catch {
+        user.value = null;
+        categories.value = [];
+    } finally {
+        loading.value = false;
+    }
+}
 async function authenticate(e: Event) {
   const data = Object.fromEntries(new FormData(e.target as HTMLFormElement)); error.value = '';
   try { await api(loginMode.value ? '/login' : '/register', { method: 'POST', body: JSON.stringify(data) }); await load(); } catch (e) { error.value = (e as Error).message; }
