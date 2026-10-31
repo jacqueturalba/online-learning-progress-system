@@ -5,20 +5,15 @@ import tailwindcss from '@tailwindcss/vite';
 import vue from '@vitejs/plugin-vue';
 
 export default defineConfig({
-    plugins: [
-        laravel({
-            input: [
-                'resources/css/app.css',
-                'resources/js/app.ts',
-            ],
-            refresh: true,
-        }),
-        vue(),
-        tailwindcss(),
-    ],
-    resolve: {
-        alias: {
-            '@': fileURLToPath(new URL('./resources/js', import.meta.url)),
-        },
+  css: { postcss: { plugins: [] } },
+  plugins: [
+    laravel({ input: ['resources/css/app.css', 'resources/js/app.ts'], refresh: true }),
+    vue(),
+    tailwindcss(),
+  ],
+  resolve: {
+    alias: {
+      '@': fileURLToPath(new URL('./resources/js', import.meta.url)),
     },
+  },
 });

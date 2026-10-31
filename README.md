@@ -456,3 +456,8 @@ Test database restoration periodically.
 - Password reset endpoints use Laravel's password broker. Local mail is logged; configure SMTP for production delivery.
 - Reporting endpoints expose paginated progress and student data for future reports.
 - AI and Zoom APIs are intentionally not integrated.
+## Safe production administrator setup
+
+The development seeder only runs in local and testing environments; never use its demo accounts in production. After configuring production environment variables and running php artisan migrate --force, create the first administrator with php artisan app:create-admin. It prompts for a name, email, and hidden password and will not elevate an existing account. Configure production SMTP, HTTPS, APP_DEBUG=false, and a unique APP_KEY before opening the service to students.
+
+Playback completion is derived from server-timed, plausible forward progress and the stored lesson duration. Large seeks and client-supplied duration values do not earn completion. Because browser playback is client-controlled, this validation does not provide DRM or cryptographic proof of playback.
