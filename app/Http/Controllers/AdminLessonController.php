@@ -7,6 +7,7 @@ use App\Models\Lesson;
 use App\Models\StudentCategoryProgress;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 
@@ -36,10 +37,18 @@ class AdminLessonController extends Controller
     public function store(Request $request)
     {
         $data = $this->validatedLesson($request);
+        $path = $request->file('video')?->store('lesson-videos', 'local');
+        if ($request->hasFile('video') && !$path) throw new \RuntimeException('The uploaded video could not be stored.');
+        if ($path) $data['video_path'] = $path;
         if (!array_key_exists('sort_order', $data)) {
             $data['sort_order'] = (Lesson::withTrashed()->where('category_id', $data['category_id'])->max('sort_order') ?? 0) + 1;
         }
-        $lesson = Lesson::create($data);
+        try {
+            $lesson = Lesson::create($data);
+        } catch (\Throwable $exception) {
+            if ($path) Storage::disk('local')->delete($path);
+            throw $exception;
+        }
         StudentCategoryProgress::refreshForCategory($lesson->category_id);
 
         return response()->json(['lesson' => $lesson->load('category:id,name')->loadCount('progress')], 201);
@@ -48,7 +57,18 @@ class AdminLessonController extends Controller
     public function update(Request $request, Lesson $lesson)
     {
         $oldCategoryId = $lesson->category_id;
-        $lesson->update($this->validatedLesson($request, $lesson));
+        $data = $this->validatedLesson($request, $lesson);
+        $oldPath = $lesson->video_path;
+        $newPath = $request->file('video')?->store('lesson-videos', 'local');
+        if ($request->hasFile('video') && !$newPath) throw new \RuntimeException('The uploaded video could not be stored.');
+        if ($newPath) $data['video_path'] = $newPath;
+        try {
+            $lesson->update($data);
+        } catch (\Throwable $exception) {
+            if ($newPath) Storage::disk('local')->delete($newPath);
+            throw $exception;
+        }
+        if ($newPath && $oldPath && $oldPath !== $newPath) Storage::disk('local')->delete($oldPath);
         StudentCategoryProgress::refreshForCategory($oldCategoryId);
         if ($lesson->category_id !== $oldCategoryId) StudentCategoryProgress::refreshForCategory($lesson->category_id);
 
@@ -103,22 +123,25 @@ class AdminLessonController extends Controller
         $data = $request->validate([
             'category_id' => [$partial ? 'sometimes' : 'required', 'integer', Rule::exists('categories', 'id')->whereNull('deleted_at')],
             'title' => [$partial ? 'sometimes' : 'required', 'string', 'max:180'],
-            'video_url' => [$partial ? 'sometimes' : 'required', 'url', 'regex:/^https?:\/\//i', 'max:2048'],
+            'video' => [$partial ? 'sometimes' : 'nullable', 'file', 'mimes:mp4,mov,webm,m4v,avi', 'extensions:mp4,mov,webm,m4v,avi', 'max:1024000'],
             'description' => ['sometimes', 'nullable', 'string'],
             'duration_seconds' => ['sometimes', 'nullable', 'integer', 'min:1'],
             'sort_order' => ['sometimes', 'integer', 'min:0'],
             'is_published' => ['sometimes', 'boolean'],
+        ], [
+            'video.max' => 'The video is too large. Choose a file no larger than 1000 MB.',
+            'video.uploaded' => 'The video upload exceeded the server limit of 1000 MB.',
         ]);
         $categoryId = $data['category_id'] ?? $lesson?->category_id;
         $published = (bool) ($data['is_published'] ?? $lesson?->is_published ?? false);
-        $videoUrl = $data['video_url'] ?? $lesson?->video_url;
+        $hasVideo = $request->hasFile('video') || filled($lesson?->video_path);
         $duration = $data['duration_seconds'] ?? $lesson?->duration_seconds;
 
-        if ($published && (!is_string($videoUrl) || !filter_var($videoUrl, FILTER_VALIDATE_URL) || !preg_match('/^https?:\/\//i', $videoUrl))) {
-            throw ValidationException::withMessages(['video_url' => 'A valid video URL is required before publishing.']);
-        }
-        if ($published && (!$duration || $duration < 1)) {
-            throw ValidationException::withMessages(['duration_seconds' => 'A positive video duration is required before publishing.']);
+        $publishErrors = [];
+        if ($published && !$hasVideo) $publishErrors['video'] = 'Upload a video before publishing.';
+        if ($published && (!$duration || $duration < 1)) $publishErrors['duration_seconds'] = 'A positive video duration is required before publishing.';
+        if ($publishErrors) {
+            throw ValidationException::withMessages($publishErrors);
         }
         if (array_key_exists('sort_order', $data) || array_key_exists('category_id', $data)) {
             $order = $data['sort_order'] ?? $lesson?->sort_order;

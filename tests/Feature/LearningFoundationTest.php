@@ -4,10 +4,13 @@ use App\Models\Category;
 use App\Models\Lesson;
 use App\Models\StudentCategoryProgress;
 use App\Models\StudentLessonProgress;
+use App\Models\StudentRealization;
 use App\Models\User;
 use Database\Seeders\DatabaseSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Http\UploadedFile;
 
 uses(RefreshDatabase::class);
 
@@ -29,6 +32,11 @@ function makeCategory(string $name = 'Basic'): Category
 function makeLesson(Category $category, string $title = 'Lesson one', int $sortOrder = 1, ?int $duration = 100): Lesson
 {
     return Lesson::create(['category_id' => $category->id, 'title' => $title, 'duration_seconds' => $duration, 'sort_order' => $sortOrder, 'is_published' => true]);
+}
+
+function fakeVideo(string $name = 'lesson.mp4'): UploadedFile
+{
+    return UploadedFile::fake()->createWithContent($name, str_repeat('v', 10240))->mimeType('video/mp4');
 }
 
 it('registers a student and ignores an attempted admin role', function () {
@@ -255,6 +263,7 @@ it('completes after server-timed playback and keeps one progress record on repea
 });
 
 it('marks categories complete from their published lessons and clears stale completion when a lesson is added', function () {
+    Storage::fake('local');
     $category = makeCategory();
     $first = makeLesson($category, 'Lesson one', 1);
     $student = makeStudent();
@@ -269,8 +278,9 @@ it('marks categories complete from their published lessons and clears stale comp
     $completeLesson($first);
     expect(StudentCategoryProgress::where('student_id', $student->id)->where('category_id', $category->id)->value('completed_at'))->not->toBeNull();
 
-    $this->actingAs(makeAdmin())->postJson('/api/admin/lessons', [
-        'category_id' => $category->id, 'title' => 'Lesson two', 'video_url' => 'https://videos.example.test/two.mp4', 'sort_order' => 2, 'duration_seconds' => 100, 'is_published' => true,
+    $this->actingAs(makeAdmin())->post('/api/admin/lessons', [
+        'category_id' => $category->id, 'title' => 'Lesson two', 'sort_order' => 2, 'duration_seconds' => 100, 'is_published' => true,
+        'video' => fakeVideo(),
     ])->assertCreated();
 
     expect(StudentCategoryProgress::where('student_id', $student->id)->where('category_id', $category->id)->value('completed_at'))->toBeNull();
@@ -281,8 +291,8 @@ it('rejects publishing a lesson without a positive duration', function () {
     $category = makeCategory();
 
     $this->actingAs($admin)->postJson('/api/admin/lessons', [
-        'category_id' => $category->id, 'title' => 'Missing duration', 'video_url' => 'https://videos.example.test/lesson.mp4', 'is_published' => true,
-    ])->assertUnprocessable()->assertJsonValidationErrors('duration_seconds');
+        'category_id' => $category->id, 'title' => 'Missing duration', 'is_published' => true,
+    ])->assertUnprocessable()->assertJsonValidationErrors(['video', 'duration_seconds']);
 });
 
 it('manages lesson search, status, ordering, and video publication validation', function () {
@@ -294,14 +304,97 @@ it('manages lesson search, status, ordering, and video publication validation', 
     $this->actingAs($admin)->getJson('/api/admin/lessons?search=Second&category_id='.$category->id.'&status=published')
         ->assertOk()->assertJsonCount(1, 'lessons.data')->assertJsonPath('lessons.data.0.id', $second->id);
 
-    $this->postJson('/api/admin/lessons', ['category_id' => $category->id, 'title' => 'Bad URL', 'video_url' => 'not-a-url', 'is_published' => true, 'duration_seconds' => 100])
-        ->assertUnprocessable()->assertJsonValidationErrors('video_url');
-    $this->postJson('/api/admin/lessons', ['category_id' => $category->id, 'title' => 'Duplicate order', 'video_url' => 'https://videos.example.test/duplicate.mp4', 'sort_order' => 1])
+    $this->postJson('/api/admin/lessons', ['category_id' => $category->id, 'title' => 'Bad video', 'video' => UploadedFile::fake()->create('bad.txt', 2, 'text/plain'), 'is_published' => true, 'duration_seconds' => 100])
+        ->assertUnprocessable()->assertJsonValidationErrors('video');
+    $this->withHeader('Accept', 'application/json')->post('/api/admin/lessons', ['category_id' => $category->id, 'title' => 'Oversized video', 'video' => UploadedFile::fake()->create('too-large.mp4', 1024001, 'video/mp4')])
+        ->assertUnprocessable()->assertJsonValidationErrors('video');
+    $this->postJson('/api/admin/lessons', ['category_id' => $category->id, 'title' => 'Duplicate order', 'sort_order' => 1])
         ->assertUnprocessable()->assertJsonValidationErrors('sort_order');
 
     $this->patchJson("/api/admin/lessons/{$second->id}/move", ['direction' => 'up'])->assertOk();
     expect($second->fresh()->sort_order)->toBe(1);
     expect($first->fresh()->sort_order)->toBe(2);
+});
+
+it('stores lesson videos privately and serves authorized byte ranges without changing progress on replacement', function () {
+    expect(config('filesystems.disks.local.root'))->toBe(storage_path('app/private'));
+    Storage::fake('local');
+    $admin = makeAdmin();
+    $student = makeStudent();
+    $otherStudent = makeStudent('other@example.test');
+    $category = makeCategory();
+    $upload = fakeVideo();
+    $created = $this->actingAs($admin)->post('/api/admin/lessons', [
+        'category_id' => $category->id, 'title' => 'Uploaded lesson', 'duration_seconds' => 100, 'is_published' => '1', 'video' => $upload,
+    ])->assertCreated();
+    $lessonId = $created->json('lesson.id');
+    $lesson = Lesson::findOrFail($lessonId);
+    expect($lesson->video_path)->toStartWith('lesson-videos/');
+    expect($created->json('lesson.video_path'))->toBeNull();
+    Storage::disk('local')->assertExists($lesson->video_path);
+    $privatePath = Storage::disk('local')->path($lesson->video_path);
+    expect(str_starts_with($privatePath, public_path()))->toBeFalse();
+    expect(is_file(public_path('storage/'.$lesson->video_path)))->toBeFalse();
+    $this->get('/storage/'.$lesson->video_path)->assertNotFound();
+
+    $this->actingAs($student)->putJson("/api/lessons/{$lessonId}/progress", ['position_seconds' => 0, 'is_playing' => false])->assertOk();
+    $payload = $this->actingAs($student)->getJson('/api/learning')->assertOk();
+    expect($payload->json('categories.0.lessons.0.video_stream_url'))->toBe(route('lessons.video', $lesson));
+    expect($payload->json('categories.0.lessons.0.video_path'))->toBeNull();
+
+    $rangeResponse = $this->actingAs($student)->withHeader('Range', 'bytes=0-3')->get(route('lessons.video', $lesson));
+    expect($rangeResponse->headers->get('Content-Range'))->toBe('bytes 0-3/10240');
+    $rangeResponse->assertStatus(206)->assertHeader('Accept-Ranges', 'bytes');
+    $this->actingAs($otherStudent)->get(route('lessons.video', $lesson))->assertStatus(206);
+    $this->actingAs($admin)->get(route('lessons.video', $lesson))->assertForbidden();
+    $unpublishedPath = fakeVideo('unpublished.mp4')->store('lesson-videos', 'local');
+    $unpublishedLesson = Lesson::create(['category_id' => $category->id, 'title' => 'Not available', 'video_path' => $unpublishedPath, 'duration_seconds' => 100, 'sort_order' => 2, 'is_published' => false]);
+    $this->actingAs($otherStudent)->get(route('lessons.video', $unpublishedLesson))->assertNotFound();
+    $this->app['auth']->guard()->logout();
+    $this->get(route('lessons.video', $lesson))->assertRedirect('/');
+
+    $oldPath = $lesson->video_path;
+    $this->actingAs($admin)->withHeader('Accept', 'application/json')->post("/api/admin/lessons/{$lessonId}", [
+        '_method' => 'PUT', 'video' => UploadedFile::fake()->create('invalid.txt', 2, 'text/plain'),
+    ])->assertUnprocessable();
+    expect($lesson->fresh()->video_path)->toBe($oldPath);
+    Storage::disk('local')->assertExists($oldPath);
+
+    $newUpload = UploadedFile::fake()->createWithContent('replacement.webm', str_repeat('v', 12288))->mimeType('video/webm');
+    $this->actingAs($admin)->post("/api/admin/lessons/{$lessonId}", [
+        '_method' => 'PUT', 'duration_seconds' => '100', 'video' => $newUpload,
+    ])->assertOk();
+    $lesson->refresh();
+    expect($lesson->video_path)->not->toBe($oldPath);
+    Storage::disk('local')->assertMissing($oldPath);
+    Storage::disk('local')->assertExists($lesson->video_path);
+    expect(StudentLessonProgress::where('student_id', $student->id)->where('lesson_id', $lessonId)->exists())->toBeTrue();
+});
+
+it('unlocks lessons in curriculum order only after verified completion and a saved realization', function () {
+    Storage::fake('local');
+    $student = makeStudent();
+    $basic = makeCategory('Basic');
+    $introductory = Category::create(['name' => 'Introductory', 'sort_order' => 2, 'is_active' => true]);
+    $basicLesson = Lesson::create(['category_id' => $basic->id, 'title' => 'Basic lesson', 'video_path' => fakeVideo()->store('lesson-videos', 'local'), 'duration_seconds' => 100, 'sort_order' => 1, 'is_published' => true]);
+    $introLesson = Lesson::create(['category_id' => $introductory->id, 'title' => 'Introductory lesson', 'video_path' => fakeVideo()->store('lesson-videos', 'local'), 'duration_seconds' => 100, 'sort_order' => 1, 'is_published' => true]);
+
+    $this->actingAs($student)->getJson('/api/learning')->assertOk()
+        ->assertJsonPath('categories.0.lessons.0.is_unlocked', true)
+        ->assertJsonPath('categories.1.lessons.0.is_unlocked', false)
+        ->assertJsonPath('categories.1.lessons.0.video_stream_url', null);
+    $this->get(route('lessons.video', $introLesson))->assertNotFound();
+    $this->putJson("/api/lessons/{$introLesson->id}/progress", ['position_seconds' => 10, 'is_playing' => false])->assertNotFound();
+    $this->postJson("/api/lessons/{$introLesson->id}/realizations", ['realization' => 'Too early'])->assertNotFound();
+
+    StudentLessonProgress::create(['student_id' => $student->id, 'lesson_id' => $basicLesson->id, 'watched_seconds' => 90, 'progress_percentage' => 90, 'is_completed' => true, 'completed_at' => now()]);
+    $this->getJson('/api/learning')->assertJsonPath('categories.1.lessons.0.is_unlocked', false);
+
+    StudentRealization::create(['student_id' => $student->id, 'lesson_id' => $basicLesson->id, 'realization' => 'I learned the fundamentals.', 'submitted_at' => now()]);
+    $learning = $this->getJson('/api/learning')->assertOk();
+    expect($learning->json('categories.1.lessons.0.is_unlocked'))->toBeTrue();
+    expect($learning->json('categories.1.lessons.0.video_stream_url'))->toBe(route('lessons.video', $introLesson));
+    $this->get(route('lessons.video', $introLesson))->assertOk();
 });
 it('archives lessons and categories that have progress instead of deleting history', function () {
     $admin = makeAdmin();
@@ -416,8 +509,14 @@ it('encrypts Zoom integration credentials and manages student-specific links', f
     $this->actingAs($admin)->postJson('/api/admin/zoom/credentials', [
         'account_id' => 'account-private-123', 'client_id' => 'client-private-456', 'client_secret' => 'secret-private-789',
     ])->assertOk()->assertJsonPath('credentials.configured', true)->assertJsonMissingPath('credentials.client_secret');
-    expect(\Illuminate\Support\Facades\DB::table('zoom_integration_settings')->where('id', 1)->value('client_secret'))->not->toBe('secret-private-789');
-    expect(\App\Models\ZoomIntegrationSetting::find(1)->client_secret)->toBe('secret-private-789');
+    $storedCredentials = \Illuminate\Support\Facades\DB::table('zoom_integration_settings')->where('id', 1)->first();
+    expect($storedCredentials->account_id)->not->toBe('account-private-123')
+        ->and($storedCredentials->client_id)->not->toBe('client-private-456')
+        ->and($storedCredentials->client_secret)->not->toBe('secret-private-789');
+    $decryptedCredentials = \App\Models\ZoomIntegrationSetting::query()->first();
+    expect($decryptedCredentials->account_id)->toBe('account-private-123')
+        ->and($decryptedCredentials->client_id)->toBe('client-private-456')
+        ->and($decryptedCredentials->client_secret)->toBe('secret-private-789');
     $this->getJson('/api/admin/zoom')->assertOk()->assertJsonMissingPath('credentials.client_secret');
 
     $this->putJson("/api/admin/zoom/assignments/{$student->id}", [

@@ -2,16 +2,64 @@
 import { onMounted, reactive, ref } from 'vue';
 
 type Category = { id: number; name: string; deleted_at: string | null };
-type Lesson = { id: number; category_id: number; title: string; description: string | null; video_url: string; duration_seconds: number | null; sort_order: number; is_published: boolean; deleted_at: string | null; progress_count: number; category?: Category };
+type Lesson = { id: number; category_id: number; title: string; description: string | null; video_stream_url: string | null; duration_seconds: number | null; sort_order: number; is_published: boolean; deleted_at: string | null; progress_count: number; category?: Category };
 const csrf = () => document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content || '';
-const lessons = ref<Lesson[]>([]), categories = ref<Category[]>([]), total = ref(0), loading = ref(false), saving = ref(false), error = ref(''), notice = ref('');
+const lessons = ref<Lesson[]>([]), categories = ref<Category[]>([]), total = ref(0), loading = ref(false), saving = ref(false), uploading = ref(false), uploadPercent = ref<number | null>(null), error = ref(''), notice = ref('');
 const search = ref(''), categoryId = ref(''), status = ref('all'), page = ref(1), lastPage = ref(1), editing = ref<number | null>(null);
-const form = reactive({ category_id: '', title: '', video_url: '', description: '', duration_seconds: '', sort_order: '', is_published: false });
+const uploadInputKey = ref(0);
+const form = reactive({ category_id: '', title: '', video: null as File | null, description: '', duration_seconds: '', sort_order: '', is_published: false });
 async function request(url: string, method = 'GET', body?: unknown) {
-  const response = await fetch(url, { method, credentials: 'same-origin', headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrf() }, body: body === undefined ? undefined : JSON.stringify(body) });
+  const isForm = body instanceof FormData;
+  const headers: Record<string, string> = { Accept: 'application/json', 'X-CSRF-TOKEN': csrf() };
+  if (body !== undefined && !isForm) headers['Content-Type'] = 'application/json';
+  const response = await fetch(url, { method, credentials: 'same-origin', headers, body: body === undefined ? undefined : isForm ? body : JSON.stringify(body) });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.message || Object.values(data.errors || {}).flat()[0] as string || 'Request failed.');
   return data;
+}
+function uploadRequest(url: string, body: FormData) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader('Accept', 'application/json');
+    xhr.setRequestHeader('X-CSRF-TOKEN', csrf());
+    xhr.upload.addEventListener('progress', event => {
+      if (event.lengthComputable) uploadPercent.value = Math.min(100, Math.round(event.loaded / event.total * 100));
+    });
+    xhr.addEventListener('load', () => {
+      const data = JSON.parse(xhr.responseText || '{}');
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+      else {
+        const videoErrors = data.errors?.video as string[] | undefined;
+        let message = Object.values(data.errors || {}).flat()[0] as string | undefined;
+        if (videoErrors?.some(item => /mimes|extension|video type|file type|file of type/i.test(item))) message = 'Unsupported video type. Choose an MP4, MOV, WebM, M4V, or AVI file.';
+        else if (videoErrors?.some(item => /max|1024000|kilobytes|1000 MB|server limit/i.test(item))) message = 'The video is too large. Choose a file no larger than 1000 MB.';
+        reject(new Error(message || data.message || 'The lesson could not be saved.'));
+      }
+    });
+    xhr.addEventListener('error', () => reject(new Error('The upload failed because of a network error. Your form entries are still here.')));
+    xhr.addEventListener('abort', () => reject(new Error('The upload was canceled. Your form entries are still here.')));
+    xhr.send(body);
+  });
+}
+function chooseVideo(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  error.value = '';
+  const extension = file.name.split('.').pop()?.toLowerCase();
+  if (!['mp4', 'mov', 'webm', 'm4v', 'avi'].includes(extension || '')) {
+    error.value = 'Unsupported video type. Choose an MP4, MOV, WebM, M4V, or AVI file.';
+    input.value = '';
+    return;
+  }
+  if (file.size > 1000 * 1024 * 1024) {
+    error.value = 'The video is too large. Choose a file no larger than 1000 MB.';
+    input.value = '';
+    return;
+  }
+  form.video = file;
 }
 async function load() {
   loading.value = true; error.value = '';
@@ -26,17 +74,23 @@ async function load() {
   } catch (caught) { error.value = (caught as Error).message; }
   finally { loading.value = false; }
 }
-function resetForm() { editing.value = null; Object.assign(form, { category_id: categories.value.find(c => !c.deleted_at)?.id.toString() || '', title: '', video_url: '', description: '', duration_seconds: '', sort_order: '', is_published: false }); }
-function edit(lesson: Lesson) { editing.value = lesson.id; Object.assign(form, { category_id: String(lesson.category_id), title: lesson.title, video_url: lesson.video_url || '', description: lesson.description || '', duration_seconds: lesson.duration_seconds ? String(lesson.duration_seconds) : '', sort_order: String(lesson.sort_order), is_published: lesson.is_published }); error.value = ''; notice.value = ''; }
+function resetForm() { editing.value = null; uploadInputKey.value++; Object.assign(form, { category_id: categories.value.find(c => !c.deleted_at)?.id.toString() || '', title: '', video: null, description: '', duration_seconds: '', sort_order: '', is_published: false }); }
+function edit(lesson: Lesson) { editing.value = lesson.id; uploadInputKey.value++; Object.assign(form, { category_id: String(lesson.category_id), title: lesson.title, video: null, description: lesson.description || '', duration_seconds: lesson.duration_seconds ? String(lesson.duration_seconds) : '', sort_order: String(lesson.sort_order), is_published: lesson.is_published }); error.value = ''; notice.value = ''; }
 async function save() {
+  if (saving.value || uploading.value) return;
   saving.value = true; error.value = ''; notice.value = '';
-  const payload = { category_id: Number(form.category_id), title: form.title, video_url: form.video_url, description: form.description || null, duration_seconds: form.duration_seconds ? Number(form.duration_seconds) : null, sort_order: form.sort_order ? Number(form.sort_order) : undefined, is_published: form.is_published };
+  const payload = new FormData();
+  payload.append('_method', editing.value ? 'PUT' : 'POST');
+  payload.append('category_id', form.category_id); payload.append('title', form.title); payload.append('description', form.description); payload.append('duration_seconds', form.duration_seconds); payload.append('is_published', form.is_published ? '1' : '0');
+  if (form.sort_order) payload.append('sort_order', form.sort_order);
+  if (form.video) payload.append('video', form.video);
   try {
-    if (editing.value) await request(`/api/admin/lessons/${editing.value}`, 'PUT', payload);
-    else await request('/api/admin/lessons', 'POST', payload);
+    uploading.value = Boolean(form.video); uploadPercent.value = form.video ? 0 : null;
+    if (editing.value) await uploadRequest(`/api/admin/lessons/${editing.value}`, payload);
+    else await uploadRequest('/api/admin/lessons', payload);
     notice.value = editing.value ? 'Lesson updated.' : 'Lesson added.'; resetForm(); await load();
   } catch (caught) { error.value = (caught as Error).message; }
-  finally { saving.value = false; }
+  finally { saving.value = false; uploading.value = false; uploadPercent.value = null; }
 }
 async function archive(lesson: Lesson) { error.value = ''; try { await request(`/api/admin/lessons/${lesson.id}`, 'DELETE'); notice.value = 'Lesson archived. Progress is preserved.'; await load(); } catch (caught) { error.value = (caught as Error).message; } }
 async function restore(lesson: Lesson) { error.value = ''; try { await request(`/api/admin/lessons/${lesson.id}/restore`, 'POST'); notice.value = 'Lesson restored.'; await load(); } catch (caught) { error.value = (caught as Error).message; } }
@@ -54,18 +108,18 @@ onMounted(() => { resetForm(); void load(); });
       <form class="lesson-editor-form" @submit.prevent="save">
         <label>Category<select v-model="form.category_id" required><option value="" disabled>Select category</option><option v-for="category in categories.filter(item => !item.deleted_at)" :key="category.id" :value="String(category.id)">{{ category.name }}</option></select></label>
         <label>Title<input v-model.trim="form.title" maxlength="180" required placeholder="Lesson title"></label>
-        <label>Video URL (Uploaded Video)<input v-model.trim="form.video_url" type="url" required placeholder="https://…"></label>
+        <label>Video Upload<input :key="uploadInputKey" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-m4v,video/x-msvideo,.mp4,.mov,.webm,.m4v,.avi" :disabled="uploading" @change="chooseVideo"><small>MP4, MOV, WebM, M4V, or AVI · up to 1000 MB{{ editing ? ' · leave empty to keep the current video' : '' }}</small></label>
         <label>Description <span class="optional-label">Optional</span><textarea v-model.trim="form.description" rows="3" placeholder="What will students learn?"></textarea></label>
         <div class="lesson-editor-row"><label>Duration in seconds<input v-model="form.duration_seconds" type="number" min="1" step="1" placeholder="Required to publish"></label><label>Position<input v-model="form.sort_order" type="number" min="0" step="1" placeholder="Auto assigned"></label></div>
         <label class="lesson-publish-toggle"><input v-model="form.is_published" type="checkbox"><span><strong>Published</strong><small>Published lessons are visible to students.</small></span></label>
+        <div v-if="uploading" class="lesson-upload-progress" role="status" aria-live="polite"><span>{{ uploadPercent === null ? 'Uploading video…' : `Uploading video · ${uploadPercent}%` }}</span><progress aria-label="Video upload progress" max="100" :value="uploadPercent === null ? undefined : uploadPercent"></progress></div>
         <p v-if="error" class="student-error" role="alert">{{ error }}</p><p v-if="notice" class="category-notice" role="status">{{ notice }}</p>
-        <div class="category-form-actions"><button class="primary" :disabled="saving || !categories.some(category => !category.deleted_at)">{{ saving ? 'Saving…' : editing ? 'Save changes' : 'Add lesson' }}</button></div>
+        <div class="category-form-actions"><button class="primary" :disabled="saving || uploading || !categories.some(category => !category.deleted_at)">{{ uploading ? 'Uploading…' : saving ? 'Saving…' : editing ? 'Save changes' : 'Add lesson' }}</button></div>
       </form>
     </section>
     <section class="lesson-list-panel">
       <div class="category-editor-heading"><div><p class="eyebrow">CURRICULUM</p><h2>Lessons <span class="category-total">{{ total }}</span></h2></div></div>
       <div class="lesson-filters"><label>Search lessons<input v-model="search" type="search" placeholder="Search by title" @input="searchChanged"></label><label>Category<select v-model="categoryId" @change="onFilter"><option value="">All categories</option><option v-for="category in categories" :key="category.id" :value="String(category.id)">{{ category.name }}{{ category.deleted_at ? ' (Archived)' : '' }}</option></select></label><label>Status<select v-model="status" @change="onFilter"><option value="all">All lessons</option><option value="published">Published</option><option value="draft">Draft</option><option value="archived">Archived</option></select></label></div>
-      <p v-if="error && !editing" class="student-error" role="alert">{{ error }}</p>
       <div v-if="loading" class="category-empty-state">Loading lessons…</div><div v-else-if="!lessons.length" class="category-empty-state">No lessons match these filters.</div>
       <div v-else class="managed-lesson-list"><article v-for="lesson in lessons" :key="lesson.id" class="managed-lesson-card" :class="{ 'is-archived': !!lesson.deleted_at }"><div class="managed-lesson-copy"><div class="managed-lesson-heading"><h3>{{ lesson.title }}</h3><span class="category-state" :class="lesson.deleted_at ? 'archived' : lesson.is_published ? 'available' : 'unavailable'">{{ lesson.deleted_at ? 'Archived' : lesson.is_published ? 'Published' : 'Draft' }}</span></div><p>{{ lesson.category?.name || 'Archived category' }} <span>·</span> Order {{ lesson.sort_order }} <span>·</span> {{ lesson.duration_seconds ? `${Math.floor(lesson.duration_seconds / 60)}:${String(lesson.duration_seconds % 60).padStart(2, '0')}` : 'Duration not set' }} <span>·</span> {{ lesson.progress_count }} progress records</p></div><div class="managed-lesson-actions"><template v-if="!lesson.deleted_at"><button v-if="status === 'all'" class="category-action" :aria-label="`Move ${lesson.title} up`" @click="move(lesson, 'up')">↑</button><button v-if="status === 'all'" class="category-action" :aria-label="`Move ${lesson.title} down`" @click="move(lesson, 'down')">↓</button><button class="category-action" :aria-label="`Edit ${lesson.title}`" @click="edit(lesson)">Edit</button><button class="category-action archive" :aria-label="`Archive ${lesson.title}`" @click="archive(lesson)">Archive</button></template><button v-else class="category-action restore" :aria-label="`Restore ${lesson.title}`" @click="restore(lesson)">Restore</button></div></article></div>
       <div v-if="lastPage > 1" class="lesson-pagination"><button class="secondary-button" :disabled="page <= 1" @click="page--; load()">Previous</button><span>Page {{ page }} of {{ lastPage }}</span><button class="secondary-button" :disabled="page >= lastPage" @click="page++; load()">Next</button></div>
