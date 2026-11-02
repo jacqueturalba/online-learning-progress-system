@@ -405,6 +405,63 @@ button, a, input { -webkit-tap-highlight-color: transparent; }
 .lesson-navigation-help, .lesson-navigation-notice { margin: 0; color: var(--text-secondary); font-size: 11px; line-height: 1.5; }
 .lesson-navigation-help { flex: 1; text-align: center; }
 .lesson-navigation-notice { margin: 10px 0; color: var(--brand-blue); }
+
+/* Branding and account security */
+.brand { min-width: 0; }
+.brand-logo { width: 38px; height: 38px; flex: none; object-fit: contain; border-radius: 8px; }
+.brand-copy { display: grid; min-width: 0; gap: 2px; }
+.brand-copy b { overflow: hidden; color: var(--text-primary); font-size: 17px; text-overflow: ellipsis; white-space: nowrap; }
+.brand-copy small { overflow: hidden; color: var(--text-secondary); font-size: 12px; font-weight: 450; letter-spacing: 0; text-overflow: ellipsis; white-space: nowrap; }
+.mobile-brand > span { display: grid; gap: 2px; }
+.mobile-brand small { color: var(--text-secondary); font-size: 12px; font-weight: 450; }
+.branding-panel, .student-profile-page .student-info-card { padding: 22px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.branding-heading h2, .profile-password-card h2, .profile-summary h2 { margin: 0; color: var(--text-primary); font-size: 21px; }
+.branding-heading p:last-child, .student-password-help { margin: 7px 0 0; color: var(--text-secondary); font-size: 14px; line-height: 1.55; }
+.branding-form { display: grid; gap: 17px; margin-top: 20px; }
+.branding-form > label, .branding-logo-field > label, .student-password-form > label, .profile-password-form > label { display: grid; gap: 7px; color: var(--text-primary); font-size: 14px; font-weight: 650; }
+.branding-form input:not([type="color"]):not([type="file"]), .student-password-form input, .profile-password-form input { min-height: 46px; padding: 9px 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text-primary); font: inherit; font-size: 16px; }
+.branding-form input::placeholder, .student-password-form input::placeholder, .profile-password-form input::placeholder { color: var(--text-secondary); opacity: .85; }
+.branding-form input:focus-visible, .student-password-form input:focus-visible, .profile-password-form input:focus-visible { border-color: var(--brand-blue); box-shadow: var(--focus-ring); }
+.branding-logo-field, .branding-colors { display: grid; gap: 13px; margin: 0; padding: 15px; border: 1px solid var(--border); border-radius: 9px; }
+.branding-logo-field legend, .branding-colors legend { padding: 0 5px; color: var(--text-primary); font-size: 15px; font-weight: 700; }
+.branding-logo-preview { display: grid; min-height: 100px; place-items: center; overflow: hidden; border: 1px dashed var(--border); border-radius: 8px; background: var(--canvas); color: var(--text-secondary); font-size: 14px; }
+.branding-logo-preview img { max-width: min(100%, 260px); max-height: 140px; object-fit: contain; }
+.branding-logo-field input[type="file"] { color: var(--text-primary); font-size: 14px; }
+.branding-colors { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+.branding-colors legend, .branding-contrast-help { grid-column: 1 / -1; }
+.branding-colors label { display: grid; gap: 7px; color: var(--text-primary); font-size: 14px; font-weight: 650; }
+.branding-colors label > span { display: flex; align-items: center; gap: 10px; }
+.branding-colors input[type="color"] { width: 44px; height: 40px; padding: 3px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.branding-colors code { color: var(--text-secondary); font-size: 13px; }
+.branding-contrast-help { margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.5; }
+.student-password-section { margin-top: 14px; }
+.student-password-section h3 { color: var(--text-primary); font-size: 17px; }
+.student-password-form, .profile-password-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; margin-top: 15px; }
+.student-password-form .primary, .student-password-form .secondary-button { align-self: end; min-height: 46px; }
+.student-password-form .student-success, .student-password-form .student-error { grid-column: 1 / -1; }
+.secondary-button { min-height: 42px; padding: 9px 13px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text-primary); font-size: 14px; font-weight: 650; }
+.secondary-button:hover:not(:disabled) { border-color: var(--brand-blue); background: var(--blue-tint); }
+.student-profile-page { display: grid; max-width: 760px; gap: 15px; }
+.profile-summary dl { display: grid; gap: 12px; margin: 18px 0 0; }
+.profile-summary dl > div { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 12px; }
+.profile-summary dt { color: var(--text-secondary); font-size: 14px; font-weight: 600; }
+.profile-summary dd { margin: 0; color: var(--text-primary); font-size: 15px; }
+.profile-password-form { grid-template-columns: minmax(0, 1fr); max-width: 520px; }
+.profile-password-form .primary { justify-self: start; min-width: 180px; min-height: 46px; }
+.student-success { font-size: 14px; line-height: 1.5; }
+:where(button, a, input, select, textarea):focus-visible { outline: 3px solid var(--brand-blue); outline-offset: 2px; }
+body { line-height: 1.5; }
+button, input, select, textarea { font-size: max(14px, 1em); }
+small { font-size: max(12px, 1em); }
+.muted, .nav-label, .eyebrow { color: var(--text-secondary); }
+.error, .student-error, [role="alert"] { line-height: 1.5; }
+.primary:hover:not(:disabled), .hero-button:hover { background: color-mix(in srgb, var(--brand-blue) 86%, #000); color: var(--action-ink); }
+@media (max-width: 680px) {
+  .branding-panel, .student-profile-page .student-info-card { padding: 15px; }
+  .student-password-form { grid-template-columns: minmax(0, 1fr); }
+  .student-password-form .primary, .student-password-form .secondary-button { width: 100%; }
+  .profile-summary dl > div { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+}
 .lesson-row:disabled { cursor: not-allowed; opacity: .6; }
 .lesson-row:disabled:hover { background: var(--surface); }
 @media (max-width: 620px) { .lesson-navigation { flex-wrap: wrap; } .lesson-navigation-help { order: 3; flex-basis: 100%; } }

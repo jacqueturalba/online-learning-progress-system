@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Validation\Rules\Password as PasswordRule;
 
@@ -38,6 +39,21 @@ class AuthController extends Controller
     }
 
     public function me(Request $request) { return response()->json(['user' => $request->user()->only('id', 'name', 'email', 'role')]); }
+
+    public function updatePassword(Request $request)
+    {
+        $data = $request->validate([
+            'current_password' => ['required', 'string', 'current_password:web'],
+            'password' => ['required', 'confirmed', 'different:current_password', PasswordRule::defaults()],
+        ], [
+            'current_password.current_password' => 'The current password is incorrect.',
+            'password.different' => 'Choose a new password that differs from your current password.',
+        ]);
+
+        $request->user()->forceFill(['password' => $data['password']])->save();
+
+        return response()->json(['message' => 'Your password has been changed.']);
+    }
 
     public function forgotPassword(Request $request)
     {

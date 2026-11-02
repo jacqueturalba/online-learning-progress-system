@@ -108,6 +108,10 @@ QUEUE_CONNECTION=sync
 
 Adjust the database credentials according to your MySQL configuration.
 
+Set STUDENT_DEFAULT_PASSWORD in .env to configure the password used by Admin student password reset and local demo accounts. Its default is ChangeMe123!; choose a private value before deploying.
+
+Branding settings use the site_settings table. Logos are stored on Laravel's public disk in storage/app/public/branding. Run php artisan storage:link once so the saved logo can be previewed and shown in the application. An admin can manage the logo, brand name, tagline, and color palette from Admin → Branding. With no saved settings, the application uses APP_NAME, a default tagline and palette, and no logo.
+
 ### Create the database
 
 1. Start MySQL in XAMPP Control Panel.
@@ -411,7 +415,7 @@ The first version uses:
 
 No queue worker or Redis service is required.
 
-Back up `storage/` if it contains user-managed files. Lesson videos are external URLs in this version.
+Back up `storage/` if it contains user-managed files. Lesson videos use Laravel private local storage; uploaded site logos use Laravel public storage and the public/storage link.
 
 Redis can be introduced later by installing the appropriate Redis client/extension and configuring the cache, session, or queue drivers after provisioning Redis.
 
