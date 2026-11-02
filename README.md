@@ -1,4 +1,4 @@
-# Learnwell
+# ZCMC ONLINE
 
 A student-first learning and progress platform built with Laravel 13, PHP 8.3+, MySQL 8+, Vue 3, TypeScript, Vite 7, and Tailwind CSS 4.
 
@@ -89,7 +89,7 @@ php artisan key:generate
 Configure `.env` with the appropriate local settings:
 
 ```env
-APP_NAME=Learnwell
+APP_NAME=ZCMC ONLINE
 APP_ENV=local
 APP_DEBUG=true
 APP_URL=http://127.0.0.1:8000
@@ -97,7 +97,7 @@ APP_URL=http://127.0.0.1:8000
 DB_CONNECTION=mysql
 DB_HOST=127.0.0.1
 DB_PORT=3306
-DB_DATABASE=learnwell
+DB_DATABASE=zcmconline
 DB_USERNAME=root
 DB_PASSWORD=
 
@@ -112,7 +112,7 @@ Adjust the database credentials according to your MySQL configuration.
 
 1. Start MySQL in XAMPP Control Panel.
 2. Open phpMyAdmin.
-3. Create an empty database named `learnwell`.
+3. Create an empty database named `zcmconline`.
 4. Confirm that the database settings in `.env` match your MySQL configuration.
 
 Never commit `.env` or expose production credentials in source control.

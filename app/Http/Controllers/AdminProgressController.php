@@ -6,6 +6,7 @@ use App\Models\Category;
 use App\Models\Lesson;
 use App\Models\PaceGroup;
 use App\Models\User;
+use App\Support\TransferEligibility;
 use Carbon\Carbon;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Http\Request;
@@ -120,20 +121,7 @@ class AdminProgressController extends Controller
 
     private function eligibilityQuery(): Builder
     {
-        $incompletePublishedLesson = DB::table('lessons as eligible_lessons')
-            ->whereColumn('eligible_lessons.category_id', 'eligible_categories.id')
-            ->where('eligible_lessons.is_published', true)->whereNull('eligible_lessons.deleted_at')
-            ->whereNotExists(DB::table('student_lesson_progress as completion')
-                ->whereColumn('completion.lesson_id', 'eligible_lessons.id')
-                ->whereColumn('completion.student_id', 'users.id')
-                ->where('completion.is_completed', true));
-
-        return DB::table('categories as eligible_categories')
-            ->where('eligible_categories.is_active', true)->whereNull('eligible_categories.deleted_at')
-            ->whereExists(DB::table('lessons as published_lessons')
-                ->whereColumn('published_lessons.category_id', 'eligible_categories.id')
-                ->where('published_lessons.is_published', true)->whereNull('published_lessons.deleted_at'))
-            ->whereNotExists($incompletePublishedLesson)
+        return TransferEligibility::eligibleCategoriesFor('users.id')
             ->limit(1)->select('eligible_categories.id');
     }
 

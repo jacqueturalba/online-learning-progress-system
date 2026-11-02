@@ -18,7 +18,7 @@ class AdminZoomController extends Controller
             'page' => ['nullable', 'integer', 'min:1'],
         ]);
 
-        $settings = ZoomIntegrationSetting::query()->find(1);
+        $settings = ZoomIntegrationSetting::query()->first();
         $status = $filters['status'] ?? 'all';
         $students = User::query()->where('role', 'student')
             ->with(['zoomAssignment:id,student_id,zoom_url,is_active,assigned_by,updated_at'])
@@ -54,7 +54,7 @@ class AdminZoomController extends Controller
 
     public function saveCredentials(Request $request)
     {
-        $settings = ZoomIntegrationSetting::query()->find(1);
+        $settings = ZoomIntegrationSetting::query()->first();
         $required = $settings ? 'nullable' : 'required';
         $data = $request->validate([
             'account_id' => [$required, 'string', 'max:255'],
@@ -63,7 +63,7 @@ class AdminZoomController extends Controller
         ]);
 
         $updates = array_filter($data, fn ($value) => is_string($value) && trim($value) !== '');
-        $settings ??= ZoomIntegrationSetting::query()->findOrNew(1);
+        $settings ??= new ZoomIntegrationSetting();
         $settings->fill($updates);
         $settings->save();
 

@@ -3,7 +3,6 @@
 namespace App\Http\Controllers;
 
 use App\Models\Category;
-use App\Models\PaceGroup;
 use Carbon\Carbon;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Http\Request;
@@ -28,18 +27,22 @@ class AdminReportController extends Controller
             throw ValidationException::withMessages(['date_to' => 'The end date must be on or after the start date.']);
         }
 
+        if ($filters['report'] === 'transfers') {
+            return app(AdminTransferAnalysisController::class)->index($request);
+        }
+
         $rows = match ($filters['report']) {
             'lesson_completion' => $this->lessonCompletion($filters),
             'student_completion' => $this->studentCompletion($filters),
             'category_progress' => $this->categoryProgress($filters),
             'realizations' => $this->realizations($filters),
-            'transfers' => $this->transfers($filters),
+            default => abort(404),
         };
 
         return response()->json([
             'report' => $filters['report'],
             'rows' => $rows,
-            'transfer_summary' => $filters['report'] === 'transfers' ? $this->transferSummary($filters) : null,
+            'transfer_summary' => null,
             'filters' => [
                 'categories' => Category::withTrashed()->orderBy('sort_order')->orderBy('id')->get(['id', 'name', 'deleted_at']),
                 'pace_groups' => app(AdminPaceGroupController::class)->options(),
@@ -130,60 +133,6 @@ class AdminReportController extends Controller
             ->selectRaw('COUNT(r.id) as realization_count')
             ->selectRaw('MAX(r.submitted_at) as latest_submission')
             ->paginate(25)->withQueryString();
-    }
-
-    private function transfers(array $filters)
-    {
-        $query = DB::table('student_category_progress as destination')
-            ->join('users as u', 'u.id', '=', 'destination.student_id')
-            ->join('categories as to_category', 'to_category.id', '=', 'destination.category_id')
-            ->join('pace_groups as pg', 'pg.code', '=', 'u.pace_group')
-            ->join('student_category_progress as source', function ($join): void {
-                $join->on('source.student_id', '=', 'destination.student_id')
-                    ->whereColumn('source.category_id', '<>', 'destination.category_id')
-                    ->whereNotNull('source.completed_at')
-                    ->whereColumn('destination.started_at', '>', 'source.completed_at');
-            })
-            ->join('categories as from_category', 'from_category.id', '=', 'source.category_id')
-            ->where('u.role', 'student')->whereNotNull('destination.started_at');
-        $this->applyCategory($query, $filters, 'source.category_id');
-        $this->applyDates($query, $filters, 'destination.started_at');
-
-        return $query->groupBy('destination.id', 'u.id', 'u.name', 'u.pseudocode', 'u.pace_group', 'pg.weekly_target', 'from_category.name', 'from_category.sort_order', 'to_category.name', 'to_category.sort_order')
-            ->orderBy('destination.started_at')->orderBy('u.name')->orderBy('destination.id')
-            ->select(['destination.id', 'u.id as student_id', 'u.name as student_name', 'u.pseudocode', 'u.pace_group', 'pg.weekly_target', 'from_category.name as from_category', 'to_category.name as to_category', 'destination.started_at as transferred_at'])
-            ->paginate(25)->withQueryString();
-    }
-
-    private function transferSummary(array $filters): array
-    {
-        $eligible = DB::table('student_category_progress as scp')
-            ->join('users as u', 'u.id', '=', 'scp.student_id')
-            ->join('categories as c', 'c.id', '=', 'scp.category_id')
-            ->where('u.role', 'student')->whereNotNull('scp.completed_at')->whereNull('c.deleted_at');
-        $this->applyCategory($eligible, $filters, 'scp.category_id');
-        $this->applyDates($eligible, $filters, 'scp.completed_at');
-        $eligibleStudents = (clone $eligible)->distinct()->count('scp.student_id');
-
-        $transfers = DB::table('student_category_progress as destination')
-            ->join('student_category_progress as source', function ($join): void {
-                $join->on('source.student_id', '=', 'destination.student_id')
-                    ->whereColumn('source.category_id', '<>', 'destination.category_id')
-                    ->whereNotNull('source.completed_at')
-                    ->whereColumn('destination.started_at', '>', 'source.completed_at');
-            })
-            ->join('users as u', 'u.id', '=', 'destination.student_id')
-            ->join('categories as c', 'c.id', '=', 'source.category_id')
-            ->where('u.role', 'student');
-        $this->applyCategory($transfers, $filters, 'source.category_id');
-        $this->applyDates($transfers, $filters, 'destination.started_at');
-        $transferredStudents = (clone $transfers)->distinct()->count('destination.student_id');
-
-        return [
-            'eligible_students' => $eligibleStudents,
-            'transferred_students' => $transferredStudents,
-            'transfer_rate' => $eligibleStudents ? round($transferredStudents / $eligibleStudents * 100, 1) : 0,
-        ];
     }
 
     private function applyCategory(Builder $query, array $filters, string $column): void

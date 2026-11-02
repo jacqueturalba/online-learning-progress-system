@@ -13,6 +13,7 @@ Route::get('/api/me', [AuthController::class, 'me'])->middleware('auth');
 Route::post('/forgot-password', [AuthController::class, 'forgotPassword'])->middleware(['guest', 'throttle:5,1']);
 Route::post('/reset-password', [AuthController::class, 'resetPassword'])->middleware(['guest', 'throttle:5,1']);
 Route::get('/api/learning', [LearningController::class, 'index'])->middleware(['auth', 'role:student']);
+Route::get('/api/lessons/{lesson}/video', [LearningController::class, 'video'])->middleware(['auth', 'role:student'])->name('lessons.video');
 Route::put('/api/lessons/{lesson}/progress', [LearningController::class, 'saveProgress'])->middleware(['auth', 'role:student', 'throttle:60,1']);
 Route::post('/api/lessons/{lesson}/realizations', [App\Http\Controllers\StudentRealizationController::class, 'store'])->middleware(['auth', 'role:student', 'throttle:10,1']);
 Route::prefix('/admin')->middleware(['auth', 'role:admin'])->group(function () {
@@ -29,6 +30,8 @@ Route::prefix('/api/admin')->middleware(['auth', 'role:admin'])->group(function 
     Route::get('/progress', App\Http\Controllers\AdminProgressController::class);
     Route::get('/realizations', App\Http\Controllers\AdminRealizationController::class);
     Route::get('/reports', App\Http\Controllers\AdminReportController::class);
+    Route::get('/insights/data', App\Http\Controllers\AdminInsightsController::class);
+    Route::post('/transfers', [App\Http\Controllers\AdminTransferAnalysisController::class, 'store']);
     Route::get('/zoom', [App\Http\Controllers\AdminZoomController::class, 'index']);
     Route::post('/zoom/credentials', [App\Http\Controllers\AdminZoomController::class, 'saveCredentials']);
     Route::put('/zoom/assignments/{student}', [App\Http\Controllers\AdminZoomController::class, 'saveAssignment']);

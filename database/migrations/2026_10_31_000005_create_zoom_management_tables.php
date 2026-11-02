@@ -8,7 +8,7 @@ return new class extends Migration {
     public function up(): void
     {
         Schema::create('zoom_integration_settings', function (Blueprint $table) {
-            $table->unsignedTinyInteger('id')->primary();
+            $table->id();
             $table->text('account_id')->nullable();
             $table->text('client_id')->nullable();
             $table->text('client_secret')->nullable();
