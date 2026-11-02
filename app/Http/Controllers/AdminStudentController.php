@@ -13,6 +13,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\Rules\Password as PasswordRule;
 
 class AdminStudentController extends Controller
 {
@@ -170,5 +171,26 @@ class AdminStudentController extends Controller
         $student->update($data);
 
         return response()->json(['pace_group' => $student->pace_group, 'weekly_target' => $student->paceGroup()->value('weekly_target')]);
+    }
+
+    public function updatePassword(Request $request, User $student)
+    {
+        abort_unless($student->role === 'student', 404);
+
+        $data = $request->validate([
+            'password' => ['required', 'confirmed', PasswordRule::defaults()],
+        ]);
+        $student->forceFill(['password' => $data['password']])->save();
+
+        return response()->json(['message' => 'Student password updated.']);
+    }
+
+    public function resetPassword(User $student)
+    {
+        abort_unless($student->role === 'student', 404);
+
+        $student->forceFill(['password' => config('student.default_password')])->save();
+
+        return response()->json(['message' => 'Student password reset to the configured default.']);
     }
 }

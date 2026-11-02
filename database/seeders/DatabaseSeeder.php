@@ -18,8 +18,8 @@ class DatabaseSeeder extends Seeder
             throw new RuntimeException('Development seed data may only be created in local or testing environments.');
         }
 
-        User::updateOrCreate(['email' => 'admin@example.test'], ['name' => 'Learning Admin', 'password' => Hash::make('ChangeMe123!'), 'role' => 'admin']);
-        $students = collect([['Jamie Rivera', 'jamie@example.test'], ['Taylor Kim', 'taylor@example.test'], ['Morgan Lee', 'morgan@example.test']])->map(fn ($student) => User::updateOrCreate(['email' => $student[1]], ['name' => $student[0], 'password' => Hash::make('ChangeMe123!'), 'role' => 'student']));
+        User::updateOrCreate(['email' => 'admin@example.test'], ['name' => 'Learning Admin', 'password' => Hash::make(config('student.default_password')), 'role' => 'admin']);
+        $students = collect([['Jamie Rivera', 'jamie@example.test'], ['Taylor Kim', 'taylor@example.test'], ['Morgan Lee', 'morgan@example.test']])->map(fn ($student) => User::updateOrCreate(['email' => $student[1]], ['name' => $student[0], 'password' => Hash::make(config('student.default_password')), 'role' => 'student']));
         $names = ['Basic', 'Introductory', 'Intermediate', 'Advanced'];
         foreach ($names as $order => $name) {
             $category = Category::withTrashed()->updateOrCreate(['name' => $name], ['description' => "A guided set of {$name} lessons.", 'sort_order' => $order + 1, 'is_active' => true]);

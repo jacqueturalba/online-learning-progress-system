@@ -27,6 +27,7 @@ const students = ref<StudentPage | null>(null), categories = ref<CategoryOption[
 const search = ref(''), categoryId = ref(''), paceGroup = ref('');
 const loading = ref(false), error = ref(''), detailLoading = ref(false), detailError = ref(''), selectedStudent = ref<StudentDetails | null>(null),
   savingPace = ref(false), paceNotice = ref('');
+const updatingPassword = ref(false), resettingPassword = ref(false), passwordNotice = ref('');
 const targetDrafts = ref<Record<string, number>>({}), savingTargets = ref(false), targetNotice = ref(''), targetError = ref('');
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -64,6 +65,7 @@ function scheduleSearch() {
 async function viewStudent(id: number) {
   detailLoading.value = true;
   detailError.value = '';
+  passwordNotice.value = '';
   paceNotice.value = '';
   selectedStudent.value = null;
   try {
@@ -100,6 +102,47 @@ async function savePaceGroup() {
   } finally {
     savingPace.value = false;
   }
+}
+
+async function updateStudentPassword(event: Event) {
+  if (!selectedStudent.value || updatingPassword.value) return;
+  const form = event.currentTarget as HTMLFormElement;
+  const values = new FormData(form);
+  const password = String(values.get('password') ?? '');
+  const passwordConfirmation = String(values.get('password_confirmation') ?? '');
+  if (!password || password !== passwordConfirmation) {
+    detailError.value = 'The password confirmation does not match.';
+    return;
+  }
+  if (!window.confirm('Update the password for ' + selectedStudent.value.real_name + '?')) return;
+  updatingPassword.value = true; passwordNotice.value = ''; detailError.value = '';
+  try {
+    const response = await fetch('/api/admin/students/' + selectedStudent.value.id + '/password', {
+      method: 'PUT', credentials: 'same-origin', headers: csrfHeaders(),
+      body: JSON.stringify({ password, password_confirmation: passwordConfirmation }),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.message || Object.values(body.errors || {}).flat()[0] as string || 'Student password could not be updated.');
+    form.reset();
+    passwordNotice.value = 'Student password updated.';
+  } catch (caught) { detailError.value = (caught as Error).message; }
+  finally { updatingPassword.value = false; }
+}
+
+async function resetStudentPassword() {
+  if (!selectedStudent.value || resettingPassword.value) return;
+  if (!window.confirm('Reset ' + selectedStudent.value.real_name + '\'s password to the configured default password?')) return;
+  resettingPassword.value = true; passwordNotice.value = ''; detailError.value = '';
+  try {
+    const response = await fetch('/api/admin/students/' + selectedStudent.value.id + '/password/reset', {
+      method: 'POST', credentials: 'same-origin', headers: csrfHeaders(),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.message || Object.values(body.errors || {}).flat()[0] as string || 'Student password could not be reset.');
+    document.querySelector<HTMLFormElement>('#student-password-form')?.reset();
+    passwordNotice.value = 'Student password reset to the configured default.';
+  } catch (caught) { detailError.value = (caught as Error).message; }
+  finally { resettingPassword.value = false; }
 }
 
 async function saveTargets() {
@@ -167,6 +210,17 @@ onMounted(() => void loadStudents());
           <article class="student-info-card"><h3><UserRound :size="17" /> Personal information</h3><dl><div><dt>Real name</dt><dd>{{ selectedStudent.personal_information.real_name }}</dd></div><div><dt>Email</dt><dd>{{ selectedStudent.personal_information.email }}</dd></div><div><dt>Pseudocode</dt><dd><span class="student-pseudocode">{{ selectedStudent.pseudocode }}</span><small>Permanent identifier · student editing is not available</small></dd></div><div><dt>Registration date</dt><dd>{{ formatDate(selectedStudent.registered_at) }}</dd></div><div><dt>Account status</dt><dd><span class="student-status" :class="selectedStudent.is_active ? 'active' : 'inactive'">{{ selectedStudent.is_active ? 'Active' : 'Inactive' }}</span></dd></div></dl></article>
           <article class="student-info-card"><h3><Clock3 :size="17" /> Learning assignment</h3><dl><div><dt>Current category</dt><dd>{{ selectedStudent.current_category?.name ?? 'Not started' }}<small v-if="selectedStudent.current_category">{{ selectedStudent.current_category.completed_lessons }} of {{ selectedStudent.current_category.total_lessons }} lessons · {{ selectedStudent.current_category.progress_percentage }}%</small></dd></div><div><dt>Pace group</dt><dd><div class="pace-editor"><select v-model="selectedStudent.pace_group" aria-label="Student pace group"><option v-for="option in paceGroups" :key="option.value" :value="option.value">{{ option.label }} · {{ option.weekly_target }}/week</option></select><button class="primary" :disabled="savingPace" @click="savePaceGroup">{{ savingPace ? 'Saving…' : 'Save pace' }}</button></div><small>{{ selectedStudent.weekly_target }} lessons / week</small><small v-if="paceNotice" class="student-success" role="status">{{ paceNotice }}</small></dd></div></dl></article>
         </div>
+        <section class="student-info-card student-password-section" aria-labelledby="student-password-title">
+          <h3 id="student-password-title">Password management</h3>
+          <p class="student-password-help">Set a new password at the student’s request, or reset it to the configured default. Existing passwords are never shown.</p>
+          <form id="student-password-form" class="student-password-form" @submit.prevent="updateStudentPassword">
+            <label>New password<input name="password" type="password" autocomplete="new-password" minlength="8" required></label>
+            <label>Confirm new password<input name="password_confirmation" type="password" autocomplete="new-password" minlength="8" required></label>
+            <button class="primary" :disabled="updatingPassword || resettingPassword">{{ updatingPassword ? 'Updating…' : 'Update password' }}</button>
+            <button type="button" class="secondary-button" :disabled="updatingPassword || resettingPassword" @click="resetStudentPassword">{{ resettingPassword ? 'Resetting…' : 'Reset to default' }}</button>
+          </form>
+          <p v-if="passwordNotice" class="student-success" role="status">{{ passwordNotice }}</p>
+        </section>
         <section class="student-info-card student-zoom-section"><h3><Clock3 :size="17" /> Zoom assignment</h3><ul v-if="selectedStudent.zoom_assignments.length" class="student-zoom-list"><li v-for="session in selectedStudent.zoom_assignments" :key="session.id"><div><strong>{{ session.title }}</strong><small>{{ formatDateTime(session.scheduled_at) }}<template v-if="session.category_name"> · {{ session.category_name }}</template><template v-if="session.lesson_title"> · {{ session.lesson_title }}</template></small></div><a :href="session.meeting_url" target="_blank" rel="noopener noreferrer">Open meeting <ExternalLink :size="14" /></a></li></ul><p v-else class="student-detail-empty">No upcoming Zoom session is assigned to this student’s current category.</p></section>
         <section class="student-info-card student-history-section"><div class="student-detail-heading"><div><p class="eyebrow">LEARNING RECORD</p><h3>Detailed learning history</h3></div></div><div v-if="selectedStudent.learning_history.length" class="student-history-list"><article v-for="category in selectedStudent.learning_history" :key="category.id" class="student-history-category"><div class="student-history-heading"><div><strong>{{ category.name }}</strong><span v-if="category.is_archived" class="dashboard-archived">Archived</span></div><span>{{ category.completed_lessons }}/{{ category.total_lessons }} complete · {{ category.progress_percentage }}%</span></div><div class="student-progress-track"><span :style="{ width: `${category.progress_percentage}%` }"></span></div><p v-if="category.completed_at" class="student-history-complete">Category completed {{ formatDate(category.completed_at) }}</p><ul><li v-for="lesson in category.lessons" :key="lesson.id"><span class="history-state" :class="{ complete: lesson.is_completed }"><Check v-if="lesson.is_completed" :size="14" /><CirclePlay v-else :size="14" /></span><span>{{ lesson.title }}<small>{{ lesson.is_completed ? 'Completed' : lesson.last_watched_at ? 'In progress · '+lesson.progress_percentage+'%' : lesson.is_published ? 'Not started' : 'Archived' }}</small></span><time v-if="lesson.last_watched_at">{{ formatDate(lesson.last_watched_at) }}</time></li></ul></article></div><p v-else class="student-detail-empty">No learning history has been recorded yet.</p></section>
       </template>

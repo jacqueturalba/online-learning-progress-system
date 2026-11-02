@@ -10,6 +10,8 @@ Route::post('/register', [AuthController::class, 'register'])->middleware(['gues
 Route::post('/login', [AuthController::class, 'login'])->middleware(['guest', 'throttle:5,1']);
 Route::post('/logout', [AuthController::class, 'logout'])->middleware('auth');
 Route::get('/api/me', [AuthController::class, 'me'])->middleware('auth');
+Route::get('/api/branding', [App\Http\Controllers\BrandingController::class, 'show']);
+Route::put('/api/profile/password', [AuthController::class, 'updatePassword'])->middleware(['auth', 'role:student', 'throttle:5,1']);
 Route::post('/forgot-password', [AuthController::class, 'forgotPassword'])->middleware(['guest', 'throttle:5,1']);
 Route::post('/reset-password', [AuthController::class, 'resetPassword'])->middleware(['guest', 'throttle:5,1']);
 Route::get('/api/learning', [LearningController::class, 'index'])->middleware(['auth', 'role:student']);
@@ -26,6 +28,10 @@ Route::prefix('/api/admin')->middleware(['auth', 'role:admin'])->group(function 
     Route::get('/students', [App\Http\Controllers\AdminStudentController::class, 'index']);
     Route::get('/students/{student}', [App\Http\Controllers\AdminStudentController::class, 'show']);
     Route::put('/students/{student}/pace-group', [App\Http\Controllers\AdminStudentController::class, 'updatePaceGroup']);
+    Route::put('/students/{student}/password', [App\Http\Controllers\AdminStudentController::class, 'updatePassword']);
+    Route::post('/students/{student}/password/reset', [App\Http\Controllers\AdminStudentController::class, 'resetPassword']);
+    Route::get('/branding', [App\Http\Controllers\BrandingController::class, 'show']);
+    Route::put('/branding', [App\Http\Controllers\BrandingController::class, 'update']);
     Route::put('/pace-groups', [App\Http\Controllers\AdminPaceGroupController::class, 'update']);
     Route::get('/progress', App\Http\Controllers\AdminProgressController::class);
     Route::get('/realizations', App\Http\Controllers\AdminRealizationController::class);
