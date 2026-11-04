@@ -194,14 +194,20 @@ class AdminReportController extends Controller
     private function filterOptions(array $filters): array
     {
         $sessions = ZoomSession::query()->whereNotNull('zoom_meeting_id')
+            ->when(($filters['report'] ?? null) === 'meeting_attendance', fn ($query) => $query->whereHas('attendanceRecords'))
+            ->when(! empty($filters['category_id']), fn ($query) => $query->where('category_id', (int) $filters['category_id']))
             ->when(($filters['batch_id'] ?? null) === 'none', fn ($query) => $query->whereNull('zoom_batch_id'))
             ->when(! empty($filters['batch_id']) && $filters['batch_id'] !== 'none', fn ($query) => $query->where('zoom_batch_id', (int) $filters['batch_id']))
-            ->with('zoomBatch')->orderBy('title')->orderBy('scheduled_at')->get();
+            ->with(['zoomBatch', 'attendanceRecords:id,zoom_session_id,raw_data,joined_at'])->orderBy('title')->orderBy('scheduled_at')->get();
 
         return [
             'categories' => Category::withTrashed()->orderBy('sort_order')->orderBy('id')->get(['id', 'name', 'deleted_at']),
             'batches' => ZoomBatch::withTrashed()->orderBy('name')->get(['id', 'name', 'deleted_at']),
-            'meetings' => $sessions->map(fn (ZoomSession $session) => ['id' => $session->id, 'title' => $session->title, 'batch_id' => $session->zoom_batch_id, 'scheduled_at' => $session->scheduled_at])->values(),
+            'meetings' => $sessions->map(fn (ZoomSession $session) => ['id' => $session->id, 'title' => $session->title, 'batch_id' => $session->zoom_batch_id,
+                'occurrence_dates' => ($filters['report'] ?? null) === 'meeting_attendance'
+                    ? $session->attendanceRecords->map(fn ($record) => data_get($record->raw_data, 'occurrence_start_time') ?: $record->joined_at?->toIso8601String())->filter()->unique()->sort()->values()
+                    : [],
+            ])->values(),
             'pace_groups' => app(AdminPaceGroupController::class)->options(),
         ];
     }
@@ -211,19 +217,19 @@ class AdminReportController extends Controller
         $query = DB::table('zoom_attendance_records as ar')
             ->join('zoom_sessions as zs', 'zs.id', '=', 'ar.zoom_session_id')
             ->leftJoin('zoom_batches as zb', 'zb.id', '=', 'zs.zoom_batch_id')
+            ->leftJoin('categories as cat', 'cat.id', '=', 'zs.category_id')
             ->leftJoin('users as u', 'u.id', '=', 'ar.student_id')
+            ->when(! empty($filters['category_id']), fn ($q) => $q->where('zs.category_id', (int) $filters['category_id']))
             ->when(($filters['batch_id'] ?? null) === 'none', fn ($q) => $q->whereNull('zs.zoom_batch_id'))
             ->when(! empty($filters['batch_id']) && $filters['batch_id'] !== 'none', fn ($q) => $q->where('zs.zoom_batch_id', (int) $filters['batch_id']))
             ->when($filters['meeting_id'] ?? null, fn ($q, $id) => $q->where('zs.id', $id))
             ->when(($filters['status'] ?? 'all') === 'matched', fn ($q) => $q->whereIn('ar.match_status', ['matched', 'manually_matched']))
             ->when(($filters['status'] ?? 'all') === 'unmatched', fn ($q) => $q->where('ar.match_status', 'unmatched'))
-            ->when($filters['date_from'] ?? null, fn ($q, $date) => $q->where('ar.joined_at', '>=', $date.' 00:00:00'))
-            ->when($filters['date_to'] ?? null, fn ($q, $date) => $q->where('ar.joined_at', '<', Carbon::parse($date)->addDay()->startOfDay()))
             ->select([
                 'ar.id', 'ar.zoom_meeting_uuid', 'ar.student_id', 'ar.registrant_id', 'ar.participant_id', 'ar.participant_pseudocode',
                 'ar.participant_name', 'ar.participant_email', 'ar.joined_at', 'ar.left_at', 'ar.duration_seconds', 'ar.match_status', 'ar.matching_method', 'ar.raw_data',
                 'zs.id as session_id', 'zs.title as meeting_title', 'zs.scheduled_at as meeting_scheduled_at', 'zs.recurrence_config',
-                'zs.zoom_batch_id as batch_id', 'zb.name as batch_name', 'u.name as student_name', 'u.pseudocode as student_pseudocode',
+                'zs.zoom_batch_id as batch_id', 'zb.name as batch_name', 'zs.category_id', 'cat.name as category_name', 'u.name as student_name', 'u.pseudocode as student_pseudocode',
             ])->orderBy('zs.id')->orderBy('ar.zoom_meeting_uuid')->orderBy('ar.joined_at')->get();
 
         $groups = $query->groupBy(function ($record): string {
@@ -238,7 +244,8 @@ class AdminReportController extends Controller
         $rows = $groups->map(function ($segments): array {
             $first = $segments->first();
             $occurrenceStart = data_get(json_decode((string) $first->raw_data, true) ?: [], 'occurrence_start_time');
-            $start = $occurrenceStart ? Carbon::parse($occurrenceStart) : ($first->joined_at ? Carbon::parse($first->joined_at) : Carbon::parse($first->meeting_scheduled_at));
+            $startValue = $occurrenceStart ?: $first->joined_at;
+            $start = $startValue ? Carbon::parse($startValue, config('app.timezone'))->timezone(config('app.timezone')) : null;
             $schedule = $this->meetingSchedule($first->meeting_scheduled_at, $first->recurrence_config);
             $joins = $segments->pluck('joined_at')->filter()->map(fn ($value) => Carbon::parse($value));
             $leaves = $segments->pluck('left_at')->filter()->map(fn ($value) => Carbon::parse($value));
@@ -246,12 +253,14 @@ class AdminReportController extends Controller
             return [
                 'batch_id' => $first->batch_id,
                 'batch_name' => $first->batch_name ?: 'No batch assigned',
+                'category_name' => $first->category_name ?: 'No category assigned',
                 'meeting_id' => $first->session_id,
                 'meeting_title' => $first->meeting_title,
                 'occurrence_uuid' => $first->zoom_meeting_uuid,
                 'occurrence_date' => $start,
                 'meeting_schedule' => $schedule,
                 'student_name' => $matched ? ($first->student_name ?: 'Student') : ($first->participant_name ?: 'Unmatched participant'),
+                'participant_name' => $first->participant_name,
                 'pseudocode' => $first->participant_pseudocode ?: ($matched ? $first->student_pseudocode : null),
                 'attendance_status' => $matched ? 'Matched' : 'Unmatched',
                 'matching_method' => $first->matching_method,
@@ -264,7 +273,12 @@ class AdminReportController extends Controller
                 'participant_email' => $first->participant_email,
                 'segments' => $segments->map(fn ($segment) => ['joined_at' => $segment->joined_at, 'left_at' => $segment->left_at, 'duration_seconds' => (int) $segment->duration_seconds])->values()->all(),
             ];
-        })->sortBy(fn ($row) => $row['occurrence_date']->timestamp.'|'.$row['batch_name'].'|'.$row['student_name'])->values();
+        })->filter(function ($row) use ($filters): bool {
+            if (! $row['occurrence_date'] && (isset($filters['date_from']) || isset($filters['date_to']))) return false;
+            $occurrenceDate = $row['occurrence_date']?->timezone(config('app.timezone'))->toDateString();
+            return (! isset($filters['date_from']) || $occurrenceDate >= $filters['date_from'])
+                && (! isset($filters['date_to']) || $occurrenceDate <= $filters['date_to']);
+        })->sortBy(fn ($row) => ($row['occurrence_date']?->timestamp ?? 0).'|'.$row['batch_name'].'|'.$row['student_name'])->values();
 
         $matchedCount = $rows->where('attendance_status', 'Matched')->count();
         $unmatchedCount = $rows->where('attendance_status', 'Unmatched')->count();
@@ -304,9 +318,9 @@ class AdminReportController extends Controller
     private function attendanceColumns(): array
     {
         return [
-            ['key' => 'batch_name', 'label' => 'Batch'], ['key' => 'batch_id', 'label' => 'Batch ID', 'type' => 'number'],
+            ['key' => 'batch_name', 'label' => 'Batch'], ['key' => 'category_name', 'label' => 'Category'], ['key' => 'batch_id', 'label' => 'Batch ID', 'type' => 'number'],
             ['key' => 'meeting_title', 'label' => 'Meeting'], ['key' => 'occurrence_date', 'label' => 'Occurrence date', 'type' => 'date'],
-            ['key' => 'meeting_schedule', 'label' => 'Meeting schedule'], ['key' => 'student_name', 'label' => 'Student'],
+            ['key' => 'meeting_schedule', 'label' => 'Meeting schedule'], ['key' => 'student_name', 'label' => 'Student'], ['key' => 'participant_name', 'label' => 'Zoom participant name'],
             ['key' => 'pseudocode', 'label' => 'Pseudocode'], ['key' => 'attendance_status', 'label' => 'Attendance status'],
             ['key' => 'join_time', 'label' => 'Join time', 'type' => 'date'], ['key' => 'leave_time', 'label' => 'Leave time', 'type' => 'date'],
             ['key' => 'total_duration_seconds', 'label' => 'Total duration', 'type' => 'duration'], ['key' => 'number_of_joins', 'label' => 'Number of joins', 'type' => 'number'],
@@ -358,7 +372,7 @@ class AdminReportController extends Controller
 
     private function attendanceFilterLabels(array $filters): array
     {
-        return ['Batch ID' => $filters['batch_id'] ?? 'All', 'Meeting ID' => $filters['meeting_id'] ?? 'All',
+        return ['Category ID' => $filters['category_id'] ?? 'All', 'Batch ID' => $filters['batch_id'] ?? 'All', 'Meeting ID' => $filters['meeting_id'] ?? 'All',
             'From' => $filters['date_from'] ?? 'All', 'To' => $filters['date_to'] ?? 'All', 'Attendance status' => $filters['status'] ?? 'all'];
     }
 
