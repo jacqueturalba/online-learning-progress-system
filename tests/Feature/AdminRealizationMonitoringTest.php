@@ -4,6 +4,8 @@ use App\Models\Category;
 use App\Models\Lesson;
 use App\Models\StudentRealization;
 use App\Models\User;
+use App\Models\ZoomBatch;
+use App\Models\ZoomBatchMembership;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Hash;
 
@@ -80,6 +82,30 @@ it('paginates realization results and retains history when a lesson is archived'
     $this->actingAs($admin)->getJson('/api/admin/realizations')->assertOk()
         ->assertJsonCount(1, 'realizations.data')->assertJsonPath('realizations.data.0.id', $record->id)
         ->assertJsonPath('realizations.data.0.lesson_title', $lesson->title);
+    expect(StudentRealization::find($record->id))->not->toBeNull();
+});
+
+it('attributes realizations to the historical batch and exports all filtered rows as XLSX', function () {
+    $admin = realizationAdmin();
+    $student = realizationStudent('historical-batch@example.test');
+    $category = Category::create(['name' => 'Historical batch category', 'sort_order' => 1, 'is_active' => true]);
+    $lesson = realizationLesson($category, 'Historical lesson');
+    $oldBatch = ZoomBatch::create(['name' => 'First batch', 'status' => 'completed', 'capacity' => 30]);
+    $newBatch = ZoomBatch::create(['name' => 'Second batch', 'status' => 'active', 'capacity' => 30]);
+    ZoomBatchMembership::create(['zoom_batch_id' => $oldBatch->id, 'student_id' => $student->id, 'status' => 'transferred', 'joined_at' => now()->subDays(10), 'ended_at' => now()->subDays(2)]);
+    ZoomBatchMembership::create(['zoom_batch_id' => $newBatch->id, 'student_id' => $student->id, 'status' => 'active', 'joined_at' => now()->subDays(2)]);
+    $record = StudentRealization::create(['student_id' => $student->id, 'lesson_id' => $lesson->id, 'realization' => 'Historical submission content.', 'submitted_at' => now()->subDays(5)]);
+
+    $this->actingAs($admin)->getJson('/api/admin/realizations')
+        ->assertOk()->assertJsonPath('realizations.data.0.batch_id', $oldBatch->id)
+        ->assertJsonPath('realizations.data.0.batch_name', $oldBatch->name);
+
+    $response = $this->actingAs($admin)->get('/api/admin/realizations?format=xlsx&batch_id='.$oldBatch->id);
+    $response->assertOk()->assertHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    expect($response->getContent())->toStartWith("PK\x03\x04")
+        ->and($response->getContent())->toContain('Historical submission content.')
+        ->and($response->getContent())->toContain($oldBatch->name)
+        ->and($response->getContent())->not->toContain($newBatch->name);
     expect(StudentRealization::find($record->id))->not->toBeNull();
 });
 

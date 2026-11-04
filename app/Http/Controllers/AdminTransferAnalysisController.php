@@ -7,6 +7,8 @@ use App\Models\StudentCategoryTransfer;
 use App\Models\StudentCategoryProgress;
 use App\Models\User;
 use App\Support\TransferEligibility;
+use App\Support\HistoricalBatchScope;
+use App\Services\ReportXlsxExporter;
 use Carbon\Carbon;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Http\Request;
@@ -22,9 +24,11 @@ class AdminTransferAnalysisController extends Controller
             'category_id' => ['nullable', 'integer', 'exists:categories,id'],
             'lesson_id' => ['nullable', 'integer', 'exists:lessons,id'],
             'pace_group' => ['nullable', Rule::exists('pace_groups', 'code')],
+            'batch_id' => ['nullable', 'string', 'regex:/^(none|[1-9][0-9]*)$/'],
             'date_from' => ['nullable', 'date_format:Y-m-d'],
             'date_to' => ['nullable', 'date_format:Y-m-d'],
             'page' => ['nullable', 'integer', 'min:1'],
+            'format' => ['nullable', 'in:xlsx'],
         ]);
         $this->validateDateRange($filters);
 
@@ -43,17 +47,29 @@ class AdminTransferAnalysisController extends Controller
             ? round($summary['transferred_students'] / $summary['eligible_students'] * 100, 1)
             : 0;
 
-        $rows = (clone $base)
+        $rowsQuery = (clone $base)
             ->orderBy('c.sort_order')->orderBy('c.id')->orderBy('u.name')->orderBy('u.id')
+            ->orderBy('report_batch.name')
             ->select([
                 'scp.id', 'u.id as student_id', 'u.name as student_name', 'u.pseudocode', 'u.pace_group',
                 'pg.weekly_target', 'c.id as category_id', 'c.name as category_name',
                 'scp.completed_at as category_completed_at', 'transfers.id as transfer_id',
-                'transfers.transferred_at', 'to_category.name as transferred_to_category',
+                'transfers.transferred_at', 'to_category.name as transferred_to_category', 'report_batch_membership.zoom_batch_id as batch_id', 'report_batch.name as batch_name',
             ])
             ->selectRaw('1 as is_transfer_eligible')
-            ->selectRaw('CASE WHEN transfers.id IS NULL THEN 0 ELSE 1 END as is_transferred')
-            ->paginate(25)->withQueryString();
+            ->selectRaw('CASE WHEN transfers.id IS NULL THEN 0 ELSE 1 END as is_transferred');
+
+        if (($filters['format'] ?? null) === 'xlsx') {
+            return app(ReportXlsxExporter::class)->download('transfer-analysis.xlsx', 'Transfer Analysis', [
+                ['key' => 'batch_name', 'label' => 'Batch'], ['key' => 'batch_id', 'label' => 'Batch ID', 'type' => 'number'],
+                ['key' => 'student_name', 'label' => 'Student'], ['key' => 'pseudocode', 'label' => 'Pseudocode'],
+                ['key' => 'pace_group', 'label' => 'Pace group'], ['key' => 'weekly_target', 'label' => 'Weekly target', 'type' => 'number'],
+                ['key' => 'category_name', 'label' => 'Completed category'], ['key' => 'category_completed_at', 'label' => 'Category completed', 'type' => 'date'],
+                ['key' => 'is_transfer_eligible', 'label' => 'Eligibility', 'type' => 'number'], ['key' => 'is_transferred', 'label' => 'Transfer status', 'type' => 'number'],
+                ['key' => 'transferred_to_category', 'label' => 'Transferred to'], ['key' => 'transferred_at', 'label' => 'Transfer date', 'type' => 'date'],
+            ], $rowsQuery->get(), ['Category ID' => $filters['category_id'] ?? 'All', 'Lesson ID' => $filters['lesson_id'] ?? 'All', 'Pace group' => $filters['pace_group'] ?? 'All', 'Batch ID' => $filters['batch_id'] ?? 'All', 'From' => $filters['date_from'] ?? 'All', 'To' => $filters['date_to'] ?? 'All'], $summary);
+        }
+        $rows = $rowsQuery->paginate(25)->withQueryString();
 
         $categories = Category::query()->where('is_active', true)->orderBy('sort_order')->orderBy('id')->get(['id', 'name']);
         $lessons = empty($filters['category_id']) ? collect() : DB::table('lessons')
@@ -67,6 +83,7 @@ class AdminTransferAnalysisController extends Controller
                 'categories' => $categories,
                 'lessons' => $lessons,
                 'pace_groups' => app(AdminPaceGroupController::class)->options(),
+                'batches' => \App\Models\ZoomBatch::withTrashed()->orderBy('name')->get(['id', 'name', 'deleted_at']),
             ],
         ]);
     }
@@ -137,6 +154,9 @@ class AdminTransferAnalysisController extends Controller
                     ->where('lesson_filter.is_completed', true));
             })
             ->when($filters['pace_group'] ?? null, fn (Builder $query, $code) => $query->where('u.pace_group', $code));
+
+        HistoricalBatchScope::join($query, 'scp.student_id', 'COALESCE(scp.completed_at, scp.started_at)');
+        HistoricalBatchScope::filter($query, $filters['batch_id'] ?? null);
 
         if (isset($filters['date_from'])) {
             $query->where('scp.completed_at', '>=', $filters['date_from'].' 00:00:00');

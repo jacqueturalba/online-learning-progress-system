@@ -151,7 +151,7 @@ it('lists students with server-side search, category and pace filters, and pagin
     $this->getJson('/api/admin/students')->assertJsonPath('students.per_page', 20)->assertJsonPath('students.total', 22)->assertJsonPath('students.last_page', 2);
 });
 
-it('shows private student history and relevant Zoom sessions to admins and allows pace changes only', function () {
+it('shows private student history and active batch Zoom access to admins and allows pace changes only', function () {
     $admin = makeAdmin();
     $student = makeStudent();
     $category = makeCategory();
@@ -162,10 +162,14 @@ it('shows private student history and relevant Zoom sessions to admins and allow
         'last_watched_at' => now()->subHour(), 'is_playing' => false, 'is_completed' => true, 'completed_at' => now()->subHour(),
     ]);
     StudentCategoryProgress::create(['student_id' => $student->id, 'category_id' => $category->id, 'started_at' => now()->subDay(), 'completed_at' => now()->subHour()]);
+    $batch = \App\Models\ZoomBatch::create(['name' => 'Student batch']);
+    \App\Models\ZoomBatchMembership::create(['zoom_batch_id' => $batch->id, 'student_id' => $student->id, 'joined_at' => now()]);
     $zoom = \App\Models\ZoomSession::create([
-        'category_id' => $category->id, 'title' => 'Category check-in', 'meeting_url' => 'https://zoom.example.test/meeting',
+        'zoom_batch_id' => $batch->id, 'zoom_meeting_id' => '123456789', 'title' => 'Batch check-in', 'meeting_url' => 'https://zoom.example.test/meeting',
         'scheduled_at' => now()->addDay(), 'is_active' => true,
     ]);
+    \App\Models\StudentZoomAssignment::create(['student_id' => $student->id, 'zoom_session_id' => $zoom->id, 'zoom_url' => 'https://zoom.example.test/unique-student-link', 'is_active' => true,
+        'registrant_id' => 'student-registrant', 'pseudocode_snapshot' => $student->pseudocode, 'registration_status' => 'registered', 'registered_at' => now(), 'registration_source' => 'zoom_api']);
 
     $this->getJson("/api/admin/students/{$student->id}")->assertUnauthorized();
     $this->actingAs($student)->getJson("/api/admin/students/{$student->id}")->assertForbidden();
@@ -178,7 +182,9 @@ it('shows private student history and relevant Zoom sessions to admins and allow
         ->assertJsonPath('student.current_category.completed_lessons', 1)
         ->assertJsonPath('student.learning_history.0.lessons.0.title', $lesson->title)
         ->assertJsonPath('student.learning_history.0.lessons.0.is_completed', true)
-        ->assertJsonPath('student.zoom_assignments.0.id', $zoom->id);
+        ->assertJsonPath('student.zoom_batch.batch_name', $batch->name)
+        ->assertJsonPath('student.zoom_batch.registration_status', 'registered')
+        ->assertJsonPath('student.zoom_batch.join_url', 'https://zoom.example.test/unique-student-link');
 
     $details->assertJsonPath('student.is_active', true);
     $this->putJson("/api/admin/students/{$student->id}/pace-group", ['pace_group' => 'A', 'pseudocode' => 'STU-CHANGED'])
@@ -314,6 +320,17 @@ it('manages lesson search, status, ordering, and video publication validation', 
     $this->patchJson("/api/admin/lessons/{$second->id}/move", ['direction' => 'up'])->assertOk();
     expect($second->fresh()->sort_order)->toBe(1);
     expect($first->fresh()->sort_order)->toBe(2);
+});
+
+it('accepts a lesson video larger than 100 MB within the configured size limit', function () {
+    $category = makeCategory();
+    $video = UploadedFile::fake()->create('large-lesson.mp4', 163 * 1024, 'video/mp4');
+
+    $this->actingAs(makeAdmin())->post('/api/admin/lessons', [
+        'category_id' => $category->id,
+        'title' => 'Large lesson upload',
+        'video' => $video,
+    ])->assertCreated()->assertJsonPath('lesson.title', 'Large lesson upload');
 });
 
 it('stores lesson videos privately and serves authorized byte ranges without changing progress on replacement', function () {
@@ -522,7 +539,7 @@ it('encrypts Zoom integration credentials and manages student-specific links', f
     $this->putJson("/api/admin/zoom/assignments/{$student->id}", [
         'zoom_url' => 'https://zoom.us/j/123456789', 'is_active' => true,
     ])->assertOk()->assertJsonPath('assignment.is_active', true);
-    $this->getJson('/api/admin/zoom?search='.$pseudocode.'&status=active')->assertOk()
+    $this->getJson('/api/admin/zoom?search='.$pseudocode.'&status=all')->assertOk()
         ->assertJsonPath('students.data.0.name', $student->name)
         ->assertJsonPath('students.data.0.pseudocode', $pseudocode)
         ->assertJsonPath('students.data.0.zoom_assignment.zoom_url', 'https://zoom.us/j/123456789');

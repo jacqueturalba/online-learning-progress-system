@@ -5,6 +5,9 @@ namespace App\Http\Controllers;
 use App\Models\Category;
 use App\Models\Lesson;
 use App\Models\StudentRealization;
+use App\Models\ZoomBatch;
+use App\Support\HistoricalBatchScope;
+use App\Services\ReportXlsxExporter;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
@@ -18,9 +21,11 @@ class AdminRealizationController extends Controller
             'student' => ['nullable', 'string', 'max:120'],
             'category_id' => ['nullable', 'integer', 'exists:categories,id'],
             'lesson_id' => ['nullable', 'integer', 'exists:lessons,id'],
+            'batch_id' => ['nullable', 'string', 'regex:/^(none|[1-9][0-9]*)$/'],
             'date_from' => ['nullable', 'date_format:Y-m-d'],
             'date_to' => ['nullable', 'date_format:Y-m-d'],
             'page' => ['nullable', 'integer', 'min:1'],
+            'format' => ['nullable', 'in:xlsx'],
         ]);
 
         if (($filters['date_from'] ?? null) && ($filters['date_to'] ?? null) && $filters['date_to'] < $filters['date_from']) {
@@ -44,7 +49,10 @@ class AdminRealizationController extends Controller
             ->when($filters['date_from'] ?? null, fn (Builder $query, $date) => $query->where('student_realizations.submitted_at', '>=', $date.' 00:00:00'))
             ->when($filters['date_to'] ?? null, fn (Builder $query, $date) => $query->where('student_realizations.submitted_at', '<', Carbon::parse($date)->addDay()->startOfDay()));
 
-        $realizations = $query
+        HistoricalBatchScope::join($query->getQuery(), 'student_realizations.student_id', 'student_realizations.submitted_at');
+        HistoricalBatchScope::filter($query->getQuery(), $filters['batch_id'] ?? null);
+
+        $realizationQuery = $query
             ->orderByDesc('student_realizations.submitted_at')->orderByDesc('student_realizations.id')
             ->select([
                 'student_realizations.id', 'student_realizations.student_id', 'student_realizations.lesson_id',
@@ -52,8 +60,18 @@ class AdminRealizationController extends Controller
                 'users.name as student_name', 'users.pseudocode',
                 'lessons.title as lesson_title', 'lessons.category_id',
                 'categories.name as category_name',
-            ])
-            ->paginate(25)->withQueryString();
+                'report_batch_membership.zoom_batch_id as batch_id', 'report_batch.name as batch_name',
+            ]);
+
+        if (($filters['format'] ?? null) === 'xlsx') {
+            return app(ReportXlsxExporter::class)->download('realizations.xlsx', 'Realizations', [
+                ['key' => 'batch_name', 'label' => 'Batch'], ['key' => 'batch_id', 'label' => 'Batch ID', 'type' => 'number'],
+                ['key' => 'student_name', 'label' => 'Student'], ['key' => 'pseudocode', 'label' => 'Pseudocode'],
+                ['key' => 'category_name', 'label' => 'Category'], ['key' => 'lesson_title', 'label' => 'Lesson'],
+                ['key' => 'realization', 'label' => 'Realization'], ['key' => 'submitted_at', 'label' => 'Submitted', 'type' => 'date'],
+            ], $realizationQuery->get(), ['Student' => $filters['student'] ?? 'All', 'Batch ID' => $filters['batch_id'] ?? 'All', 'Category ID' => $filters['category_id'] ?? 'All', 'Lesson ID' => $filters['lesson_id'] ?? 'All', 'From' => $filters['date_from'] ?? 'All', 'To' => $filters['date_to'] ?? 'All']);
+        }
+        $realizations = $realizationQuery->paginate(25)->withQueryString();
 
         $categories = Category::withTrashed()->orderBy('sort_order')->orderBy('id')->get(['id', 'name', 'deleted_at']);
         $lessons = empty($filters['category_id']) ? collect() : Lesson::withTrashed()
@@ -62,7 +80,7 @@ class AdminRealizationController extends Controller
 
         return response()->json([
             'realizations' => $realizations,
-            'filters' => ['categories' => $categories, 'lessons' => $lessons],
+            'filters' => ['categories' => $categories, 'lessons' => $lessons, 'batches' => ZoomBatch::withTrashed()->orderBy('name')->get(['id', 'name', 'deleted_at'])],
         ]);
     }
 }
