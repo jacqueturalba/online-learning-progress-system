@@ -221,7 +221,7 @@ class AdminReportController extends Controller
             ->when($filters['date_to'] ?? null, fn ($q, $date) => $q->where('ar.joined_at', '<', Carbon::parse($date)->addDay()->startOfDay()))
             ->select([
                 'ar.id', 'ar.zoom_meeting_uuid', 'ar.student_id', 'ar.registrant_id', 'ar.participant_id', 'ar.participant_pseudocode',
-                'ar.participant_name', 'ar.participant_email', 'ar.joined_at', 'ar.left_at', 'ar.duration_seconds', 'ar.match_status', 'ar.raw_data',
+                'ar.participant_name', 'ar.participant_email', 'ar.joined_at', 'ar.left_at', 'ar.duration_seconds', 'ar.match_status', 'ar.matching_method', 'ar.raw_data',
                 'zs.id as session_id', 'zs.title as meeting_title', 'zs.scheduled_at as meeting_scheduled_at', 'zs.recurrence_config',
                 'zs.zoom_batch_id as batch_id', 'zb.name as batch_name', 'u.name as student_name', 'u.pseudocode as student_pseudocode',
             ])->orderBy('zs.id')->orderBy('ar.zoom_meeting_uuid')->orderBy('ar.joined_at')->get();
@@ -254,6 +254,7 @@ class AdminReportController extends Controller
                 'student_name' => $matched ? ($first->student_name ?: 'Student') : ($first->participant_name ?: 'Unmatched participant'),
                 'pseudocode' => $first->participant_pseudocode ?: ($matched ? $first->student_pseudocode : null),
                 'attendance_status' => $matched ? 'Matched' : 'Unmatched',
+                'matching_method' => $first->matching_method,
                 'join_time' => $joins->isNotEmpty() ? $joins->min() : null,
                 'leave_time' => $leaves->isNotEmpty() ? $leaves->max() : null,
                 'total_duration_seconds' => $segments->sum(fn ($segment) => (int) $segment->duration_seconds),
@@ -310,6 +311,7 @@ class AdminReportController extends Controller
             ['key' => 'join_time', 'label' => 'Join time', 'type' => 'date'], ['key' => 'leave_time', 'label' => 'Leave time', 'type' => 'date'],
             ['key' => 'total_duration_seconds', 'label' => 'Total duration', 'type' => 'duration'], ['key' => 'number_of_joins', 'label' => 'Number of joins', 'type' => 'number'],
             ['key' => 'registrant_id', 'label' => 'Zoom registrant ID'],
+            ['key' => 'matching_method', 'label' => 'Matching method'],
             ['key' => 'participant_id', 'label' => 'Zoom participant ID'], ['key' => 'participant_email', 'label' => 'Participant email'],
         ];
     }
