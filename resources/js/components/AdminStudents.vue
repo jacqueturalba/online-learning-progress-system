@@ -13,7 +13,7 @@ type StudentDetails = {
   id: number; real_name: string; email: string; pseudocode: string; pace_group: string; weekly_target: number; is_active: boolean; registered_at: string;
   personal_information: { real_name: string; email: string };
   current_category: HistoryCategory | null;
-  zoom_assignments: { id: number; title: string; meeting_url: string; scheduled_at: string; category_name: string | null; lesson_title: string | null }[];
+  zoom_batch: { batch_id: number; batch_name: string; topic: string | null; scheduled_at: string | null; recurrence: Record<string, unknown> | null; registration_status: string; join_url: string | null; registration_error: string | null } | null;
   learning_history: HistoryCategory[];
 };
 type HistoryCategory = {
@@ -162,7 +162,8 @@ function formatDate(value: string | null) {
   if (!value) return '—';
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(new Date(value));
 }
-function formatDateTime(value: string) {
+function formatDateTime(value: string | null) {
+  if (!value) return 'Schedule not set';
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
 }
 
@@ -221,7 +222,7 @@ onMounted(() => void loadStudents());
           </form>
           <p v-if="passwordNotice" class="student-success" role="status">{{ passwordNotice }}</p>
         </section>
-        <section class="student-info-card student-zoom-section"><h3><Clock3 :size="17" /> Zoom assignment</h3><ul v-if="selectedStudent.zoom_assignments.length" class="student-zoom-list"><li v-for="session in selectedStudent.zoom_assignments" :key="session.id"><div><strong>{{ session.title }}</strong><small>{{ formatDateTime(session.scheduled_at) }}<template v-if="session.category_name"> · {{ session.category_name }}</template><template v-if="session.lesson_title"> · {{ session.lesson_title }}</template></small></div><a :href="session.meeting_url" target="_blank" rel="noopener noreferrer">Open meeting <ExternalLink :size="14" /></a></li></ul><p v-else class="student-detail-empty">No upcoming Zoom session is assigned to this student’s current category.</p></section>
+        <section class="student-info-card student-zoom-section"><h3><Clock3 :size="17" /> Zoom assignment</h3><template v-if="selectedStudent.zoom_batch"><div class="student-zoom-list"><div><strong>{{ selectedStudent.zoom_batch.batch_name }}</strong><small>{{ selectedStudent.zoom_batch.topic || 'Meeting not created' }} · {{ formatDateTime(selectedStudent.zoom_batch.scheduled_at) }} · {{ selectedStudent.zoom_batch.recurrence?.frequency || 'one-time' }} · {{ selectedStudent.zoom_batch.registration_status }}</small><small v-if="selectedStudent.zoom_batch.registration_error">{{ selectedStudent.zoom_batch.registration_error }}</small></div><a v-if="selectedStudent.zoom_batch.join_url" :href="selectedStudent.zoom_batch.join_url" target="_blank" rel="noopener noreferrer">Individual join link <ExternalLink :size="14" /></a><a :href="`/admin/zoom?batch=${selectedStudent.zoom_batch.batch_id}`">Batch details</a></div></template><p v-else class="student-detail-empty">No Zoom batch is currently assigned to this student.</p></section>
         <section class="student-info-card student-history-section"><div class="student-detail-heading"><div><p class="eyebrow">LEARNING RECORD</p><h3>Detailed learning history</h3></div></div><div v-if="selectedStudent.learning_history.length" class="student-history-list"><article v-for="category in selectedStudent.learning_history" :key="category.id" class="student-history-category"><div class="student-history-heading"><div><strong>{{ category.name }}</strong><span v-if="category.is_archived" class="dashboard-archived">Archived</span></div><span>{{ category.completed_lessons }}/{{ category.total_lessons }} complete · {{ category.progress_percentage }}%</span></div><div class="student-progress-track"><span :style="{ width: `${category.progress_percentage}%` }"></span></div><p v-if="category.completed_at" class="student-history-complete">Category completed {{ formatDate(category.completed_at) }}</p><ul><li v-for="lesson in category.lessons" :key="lesson.id"><span class="history-state" :class="{ complete: lesson.is_completed }"><Check v-if="lesson.is_completed" :size="14" /><CirclePlay v-else :size="14" /></span><span>{{ lesson.title }}<small>{{ lesson.is_completed ? 'Completed' : lesson.last_watched_at ? 'In progress · '+lesson.progress_percentage+'%' : lesson.is_published ? 'Not started' : 'Archived' }}</small></span><time v-if="lesson.last_watched_at">{{ formatDate(lesson.last_watched_at) }}</time></li></ul></article></div><p v-else class="student-detail-empty">No learning history has been recorded yet.</p></section>
       </template>
     </section>

@@ -8,7 +8,8 @@ use App\Models\PaceGroup;
 use App\Models\StudentCategoryProgress;
 use App\Models\StudentLessonProgress;
 use App\Models\User;
-use App\Models\ZoomSession;
+use App\Models\StudentZoomAssignment;
+use App\Models\ZoomBatchMembership;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -125,24 +126,17 @@ class AdminStudentController extends Controller
             })->values();
 
         $currentCategory = $history->first();
-        $categoryId = $currentCategory['id'] ?? null;
-        $zoomAssignments = ZoomSession::query()->where('is_active', true)->where('scheduled_at', '>=', now())
-            ->where(function (Builder $query) use ($categoryId): void {
-                $query->whereNull('category_id')->whereNull('lesson_id');
-                if ($categoryId) {
-                    $query->orWhere('category_id', $categoryId)
-                        ->orWhereHas('lesson', fn (Builder $lesson) => $lesson->where('category_id', $categoryId));
-                }
-            })
-            ->with(['category:id,name', 'lesson:id,title'])->orderBy('scheduled_at')->get()
-            ->map(fn (ZoomSession $session) => [
-                'id' => $session->id,
-                'title' => $session->title,
-                'meeting_url' => $session->meeting_url,
-                'scheduled_at' => $session->scheduled_at,
-                'category_name' => $session->category?->name,
-                'lesson_title' => $session->lesson?->title,
-            ]);
+        $membership = ZoomBatchMembership::query()->where('student_id', $student->id)->where('status', 'active')->with('zoomBatch')->orderByDesc('id')->first();
+        $batchZoom = null;
+        if ($membership) {
+            $session = $membership->zoomBatch->zoomSessions()->whereNotNull('zoom_meeting_id')->orderByDesc('id')->first();
+            $registration = $session ? StudentZoomAssignment::query()->where('student_id', $student->id)->where('zoom_session_id', $session->id)->first() : null;
+            $batchZoom = ['batch_id' => $membership->zoomBatch->id, 'batch_name' => $membership->zoomBatch->name,
+                'topic' => $session?->title, 'scheduled_at' => $session?->scheduled_at, 'recurrence' => $session?->recurrence_config,
+                'registration_status' => $registration?->registration_status ?? 'pending',
+                'join_url' => $registration?->registration_status === 'registered' ? $registration->zoom_url : null,
+                'registration_error' => $registration?->registration_error];
+        }
 
         return response()->json([
             'student' => [
@@ -156,7 +150,7 @@ class AdminStudentController extends Controller
                 'is_active' => $student->is_active,
                 'registered_at' => $student->created_at,
                 'current_category' => $currentCategory,
-                'zoom_assignments' => $zoomAssignments,
+                'zoom_batch' => $batchZoom,
                 'learning_history' => $history,
             ],
             'pace_groups' => app(AdminPaceGroupController::class)->options(),

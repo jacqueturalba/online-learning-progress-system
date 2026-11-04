@@ -51,6 +51,30 @@ class LearningController extends Controller
         return response()->json(['categories' => $categories]);
     }
 
+    public function myZoom(Request $request)
+    {
+        $student = $request->user();
+        $membership = $student->zoomBatchMemberships()->where('status', 'active')->with('zoomBatch')->orderByDesc('id')->first();
+        $meetings = collect();
+        if ($membership) {
+            $session = $membership->zoomBatch->zoomSessions()->whereNotNull('zoom_meeting_id')->orderByDesc('id')->first();
+            $assignment = $session ? $student->zoomAssignments()->where('zoom_session_id', $session->id)->first() : null;
+            $meetings->push([
+                'id' => $session?->id ?? $membership->id,
+                'pseudocode' => $student->pseudocode,
+                'join_url' => $assignment?->registration_status === 'registered' ? $assignment->zoom_url : null,
+                'registered_at' => $assignment?->registered_at,
+                'batch_name' => $membership->zoomBatch->name,
+                'topic' => $session?->title,
+                'scheduled_at' => $session?->scheduled_at,
+                'recurrence' => $session?->recurrence_config,
+                'registration_status' => $assignment?->registration_status ?? 'pending',
+                'registration_error' => $assignment?->registration_error,
+            ]);
+        }
+        return response()->json(['pseudocode' => $student->pseudocode, 'meetings' => $meetings]);
+    }
+
     public function video(Request $request, Lesson $lesson)
     {
         abort_unless($request->user()->role === 'student', 403);

@@ -16,7 +16,10 @@ class User extends Authenticatable
     protected function casts(): array { return ['email_verified_at' => 'datetime', 'password' => 'hashed', 'is_active' => 'boolean']; }
     public function lessonProgress() { return $this->hasMany(StudentLessonProgress::class, 'student_id'); }
     public function categoryProgress() { return $this->hasMany(StudentCategoryProgress::class, 'student_id'); }
-    public function zoomAssignment() { return $this->hasOne(StudentZoomAssignment::class, 'student_id'); }
+    public function zoomAssignment() { return $this->hasOne(StudentZoomAssignment::class, 'student_id')->whereNull('zoom_session_id'); }
+    public function zoomAssignments() { return $this->hasMany(StudentZoomAssignment::class, 'student_id'); }
+    public function zoomBatchMemberships() { return $this->hasMany(ZoomBatchMembership::class, 'student_id'); }
+    public function zoomAttendanceRecords() { return $this->hasMany(ZoomAttendanceRecord::class, 'student_id'); }
     public function realizations() { return $this->hasMany(StudentRealization::class, 'student_id'); }
     public function paceGroup() { return $this->belongsTo(PaceGroup::class, 'pace_group', 'code'); }
 

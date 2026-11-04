@@ -28,14 +28,25 @@ function uploadRequest(url: string, body: FormData) {
       if (event.lengthComputable) uploadPercent.value = Math.min(100, Math.round(event.loaded / event.total * 100));
     });
     xhr.addEventListener('load', () => {
-      const data = JSON.parse(xhr.responseText || '{}');
+      const contentType = xhr.getResponseHeader('Content-Type') || '';
+      let data: Record<string, any> = {};
+      if (contentType.toLowerCase().includes('application/json')) {
+        try {
+          const parsed = JSON.parse(xhr.responseText || '{}');
+          if (parsed && typeof parsed === 'object') data = parsed;
+        } catch {
+          // A broken JSON response is still handled as a generic server error below.
+        }
+      }
       if (xhr.status >= 200 && xhr.status < 300) resolve(data);
-      else {
+      else if (xhr.status === 413) {
+        reject(new Error('Upload failed because the video is too large. Maximum allowed size is 1000 MB.'));
+      } else {
         const videoErrors = data.errors?.video as string[] | undefined;
         let message = Object.values(data.errors || {}).flat()[0] as string | undefined;
         if (videoErrors?.some(item => /mimes|extension|video type|file type|file of type/i.test(item))) message = 'Unsupported video type. Choose an MP4, MOV, WebM, M4V, or AVI file.';
         else if (videoErrors?.some(item => /max|1024000|kilobytes|1000 MB|server limit/i.test(item))) message = 'The video is too large. Choose a file no larger than 1000 MB.';
-        reject(new Error(message || data.message || 'The lesson could not be saved.'));
+        reject(new Error(message || data.message || 'The lesson could not be saved. The server returned an unexpected response.'));
       }
     });
     xhr.addEventListener('error', () => reject(new Error('The upload failed because of a network error. Your form entries are still here.')));
