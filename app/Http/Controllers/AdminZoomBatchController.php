@@ -241,11 +241,15 @@ class AdminZoomBatchController extends Controller
         return response()->json(['results' => $results, 'batch' => $this->details($batch->fresh())]);
     }
 
-    public function syncAttendance(ZoomBatch $batch, ZoomSession $session, ZoomApiService $zoom)
+    public function syncAttendance(Request $request, ZoomBatch $batch, ZoomSession $session, ZoomApiService $zoom)
     {
         abort_unless((int) $session->zoom_batch_id === (int) $batch->id && $session->zoom_meeting_id, 404);
-        $from = Carbon::parse($session->scheduled_at)->max(now()->subMonths(11))->toDateString();
-        $to = now()->toDateString();
+        $range = $request->validate(['from' => ['nullable', 'date_format:Y-m-d'], 'to' => ['nullable', 'date_format:Y-m-d']]);
+        $from = $range['from'] ?? Carbon::parse($session->scheduled_at)->max(now()->subMonths(14))->toDateString();
+        $to = $range['to'] ?? now()->toDateString();
+        if ($to < $from || Carbon::parse($from)->diffInMonths(Carbon::parse($to)) > 14) {
+            return response()->json(['message' => 'Choose a valid date range within Zoom’s 15-month attendance history window.'], 422);
+        }
         $meetingInstances = [];
         $cursor = Carbon::parse($from)->startOfMonth();
         $lastMonth = Carbon::parse($to)->startOfMonth();
@@ -279,9 +283,22 @@ class AdminZoomBatchController extends Controller
                         $pseudocode = $this->pseudocodeFromName($name);
                         $assignment = $registrantId ? StudentZoomAssignment::query()
                             ->where('zoom_session_id', $session->id)->where('registrant_id', $registrantId)->first() : null;
-                        if (! $assignment && $pseudocode) {
-                            $assignment = StudentZoomAssignment::query()->where('zoom_session_id', $session->id)
-                                ->where('pseudocode_snapshot', $pseudocode)->first();
+                        $student = null;
+                        $matchMethod = null;
+                        if ($assignment = ($registrantId ? StudentZoomAssignment::query()->where('zoom_session_id', $session->id)->where('registrant_id', $registrantId)->first() : null)) {
+                            $student = $assignment->student;
+                            $matchMethod = 'registrant_id';
+                        }
+                        if (! $student && $pseudocode) {
+                            $student = User::query()->where('role', 'student')->whereRaw('UPPER(pseudocode) = ?', [mb_strtoupper($pseudocode)])->first();
+                            if ($student) $matchMethod = 'pseudocode';
+                            $assignment ??= StudentZoomAssignment::query()->where('zoom_session_id', $session->id)->whereRaw('UPPER(pseudocode_snapshot) = ?', [mb_strtoupper($pseudocode)])->first();
+                            if (! $student && $assignment?->student) { $student = $assignment->student; $matchMethod = 'pseudocode'; }
+                        }
+                        $email = mb_strtolower(trim((string) ($participant['user_email'] ?? $participant['email'] ?? '')));
+                        if (! $student && $email !== '') {
+                            $emailMatches = User::query()->where('role', 'student')->whereRaw('LOWER(email) = ?', [$email])->limit(2)->get();
+                            if ($emailMatches->count() === 1) { $student = $emailMatches->first(); $matchMethod = 'email'; }
                         }
                         $joinedAt = ! empty($participant['join_time']) ? Carbon::parse($participant['join_time']) : null;
                         $leftAt = ! empty($participant['leave_time']) ? Carbon::parse($participant['leave_time']) : null;
@@ -294,7 +311,7 @@ class AdminZoomBatchController extends Controller
                             'zoom_session_id' => $session->id, 'zoom_meeting_uuid' => (string) $uuid, 'dedupe_key' => $dedupeKey,
                         ]);
                         $record->fill([
-                            'student_id' => $assignment?->student_id,
+                            'student_id' => $student?->id,
                             'registrant_id' => $registrantId,
                             'participant_id' => $participantId,
                             'participant_pseudocode' => $assignment?->pseudocode_snapshot ?: $pseudocode,
@@ -303,11 +320,12 @@ class AdminZoomBatchController extends Controller
                             'joined_at' => $joinedAt,
                             'left_at' => $leftAt,
                             'duration_seconds' => $duration,
-                            'match_status' => $assignment ? 'matched' : 'unmatched',
+                            'match_status' => $student ? 'matched' : 'unmatched',
+                            'matching_method' => $matchMethod,
                             'raw_data' => ['occurrence_start_time' => $occurrence['start_time'] ?? null, 'participant' => $participant],
                         ]);
                         $record->save();
-                        $assignment ? $matched++ : $unmatched++;
+                        $student ? $matched++ : $unmatched++;
                     }
                     $token = $page['next_page_token'] ?? null;
                 } while ($token);

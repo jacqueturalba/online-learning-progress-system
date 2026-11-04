@@ -13,7 +13,7 @@ class ZoomAttendanceRecord extends Model
     protected $fillable = [
         'zoom_session_id', 'zoom_meeting_uuid', 'student_id', 'registrant_id', 'participant_id',
         'participant_pseudocode', 'participant_name', 'participant_email', 'joined_at', 'left_at',
-        'duration_seconds', 'match_status', 'raw_data', 'dedupe_key',
+        'duration_seconds', 'match_status', 'matching_method', 'raw_data', 'dedupe_key',
     ];
 
     protected function casts(): array
