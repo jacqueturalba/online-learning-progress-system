@@ -10,9 +10,13 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
+use Symfony\Component\HttpFoundation\File\UploadedFile as SymfonyUploadedFile;
 
 class AdminLessonController extends Controller
 {
+    // Laravel's file-size rule measures kilobytes (1024 bytes per KB): 1000 MiB = 1,024,000 KB.
+    private const MAX_VIDEO_SIZE_KILOBYTES = 1024000;
+
     public function index(Request $request)
     {
         $filters = $request->validate([
@@ -120,17 +124,17 @@ class AdminLessonController extends Controller
     private function validatedLesson(Request $request, ?Lesson $lesson = null): array
     {
         $partial = $lesson !== null;
+        $this->validateVideoUploadTransport($request);
         $data = $request->validate([
             'category_id' => [$partial ? 'sometimes' : 'required', 'integer', Rule::exists('categories', 'id')->whereNull('deleted_at')],
             'title' => [$partial ? 'sometimes' : 'required', 'string', 'max:180'],
-            'video' => [$partial ? 'sometimes' : 'nullable', 'file', 'mimes:mp4,mov,webm,m4v,avi', 'extensions:mp4,mov,webm,m4v,avi', 'max:1024000'],
+            'video' => [$partial ? 'sometimes' : 'nullable', 'file', 'mimes:mp4,mov,webm,m4v,avi', 'extensions:mp4,mov,webm,m4v,avi', 'max:'.self::MAX_VIDEO_SIZE_KILOBYTES],
             'description' => ['sometimes', 'nullable', 'string'],
             'duration_seconds' => ['sometimes', 'nullable', 'integer', 'min:1'],
             'sort_order' => ['sometimes', 'integer', 'min:0'],
             'is_published' => ['sometimes', 'boolean'],
         ], [
             'video.max' => 'The video is too large. Choose a file no larger than 1000 MB.',
-            'video.uploaded' => 'The video upload exceeded the server limit of 1000 MB.',
         ]);
         $categoryId = $data['category_id'] ?? $lesson?->category_id;
         $published = (bool) ($data['is_published'] ?? $lesson?->is_published ?? false);
@@ -152,5 +156,35 @@ class AdminLessonController extends Controller
 
         if (!$partial && !array_key_exists('is_published', $data)) $data['is_published'] = false;
         return $data;
+    }
+
+    private function validateVideoUploadTransport(Request $request): void
+    {
+        $video = $request->file('video');
+        if ($video instanceof SymfonyUploadedFile && ! $video->isValid() && $video->getError() !== UPLOAD_ERR_NO_FILE) {
+            $message = match ($video->getError()) {
+                UPLOAD_ERR_INI_SIZE => 'The video exceeds the active PHP upload_max_filesize setting ('.(ini_get('upload_max_filesize') ?: 'unknown').').',
+                UPLOAD_ERR_FORM_SIZE => 'The video exceeds the upload form size limit.',
+                UPLOAD_ERR_PARTIAL => 'The video upload was interrupted before it completed. Please retry.',
+                UPLOAD_ERR_NO_TMP_DIR => 'PHP could not find its temporary upload directory. Contact the server administrator.',
+                UPLOAD_ERR_CANT_WRITE => 'PHP could not write the uploaded video to temporary storage. Check server disk space and permissions.',
+                UPLOAD_ERR_EXTENSION => 'A PHP extension stopped the video upload. Contact the server administrator.',
+                default => 'The video upload failed at the PHP server layer. Please retry or contact the server administrator.',
+            };
+            throw ValidationException::withMessages(['video' => $message]);
+        }
+
+        $contentLength = filter_var($request->server('CONTENT_LENGTH'), FILTER_VALIDATE_INT);
+        $postMaxBytes = $this->iniSizeToBytes((string) ini_get('post_max_size'));
+        if (! $request->hasFile('video') && $contentLength && $postMaxBytes > 0 && $contentLength > $postMaxBytes) {
+            throw ValidationException::withMessages(['video' => 'The complete request exceeded the active PHP post_max_size setting ('.(ini_get('post_max_size') ?: 'unknown').'), so PHP discarded the uploaded form data.']);
+        }
+    }
+
+    private function iniSizeToBytes(string $value): int
+    {
+        if (! preg_match('/^\s*(\d+(?:\.\d+)?)\s*([KMG])?\s*$/i', $value, $matches)) return 0;
+        $multiplier = match (strtoupper($matches[2] ?? '')) { 'K' => 1024, 'M' => 1024 ** 2, 'G' => 1024 ** 3, default => 1 };
+        return (int) ((float) $matches[1] * $multiplier);
     }
 }
