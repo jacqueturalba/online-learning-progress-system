@@ -251,6 +251,9 @@ class AdminZoomBatchController extends Controller
             return response()->json(['message' => 'Choose a valid date range within Zoom’s 15-month attendance history window.'], 422);
         }
         $meetingInstances = [];
+        $participantsRetrieved = 0;
+        $matched = 0;
+        $unmatched = 0;
         $cursor = Carbon::parse($from)->startOfMonth();
         $lastMonth = Carbon::parse($to)->startOfMonth();
 
@@ -271,13 +274,12 @@ class AdminZoomBatchController extends Controller
                 $cursor->addMonth();
             }
 
-            $matched = 0;
-            $unmatched = 0;
             foreach ($meetingInstances as $uuid => $occurrence) {
                 $token = null;
                 do {
                     $page = $zoom->pastMeetingParticipants((string) $uuid, $token);
                     foreach ($page['participants'] ?? [] as $participant) {
+                        $participantsRetrieved++;
                         $registrantId = $participant['registrant_id'] ?? null;
                         $name = trim((string) ($participant['name'] ?? $participant['user_name'] ?? ''));
                         $pseudocode = $this->pseudocodeFromName($name);
@@ -333,13 +335,26 @@ class AdminZoomBatchController extends Controller
             $session->forceFill(['last_synced_at' => now()])->save();
         } catch (ZoomApiException $exception) {
             $message = $exception->getMessage();
-            if ($exception->httpStatus === 403 || str_contains(mb_strtolower($message), 'permission')) {
-                $message = 'Zoom denied the attendance request. Confirm the history meeting and past meeting participant scopes are enabled.';
-            }
-            return response()->json(['message' => $message], 422);
+            $lower = mb_strtolower($message);
+            $category = match (true) {
+                $exception->httpStatus === 403 || str_contains($lower, 'permission') || str_contains($lower, 'scope') => 'missing_permissions',
+                $exception->httpStatus === 401 => 'expired_or_invalid_token',
+                $exception->httpStatus === 404 || str_contains($lower, 'meeting does not exist') => 'invalid_meeting_id',
+                str_contains($lower, 'not end') || str_contains($lower, 'not ended') => 'unsupported_or_incomplete_meeting',
+                $exception->httpStatus === 429 => 'rate_limited',
+                default => 'zoom_api_error',
+            };
+            if ($category === 'missing_permissions') $message .= ' Check report:read:admin and meeting:read (or meeting:read:admin) in the Zoom app.';
+            return response()->json(['message' => $message, 'category' => $category, 'zoom_http_status' => $exception->httpStatus,
+                'meetings_retrieved' => count($meetingInstances), 'participants_retrieved' => $participantsRetrieved,
+                'matched' => $matched, 'unmatched' => $unmatched], 422);
         }
 
-        return response()->json(['message' => 'Attendance sync completed.', 'matched' => $matched, 'unmatched' => $unmatched, 'occurrences' => count($meetingInstances), 'last_synced_at' => $session->last_synced_at]);
+        $noAttendance = $participantsRetrieved === 0;
+        return response()->json(['message' => $noAttendance ? 'No historical attendance participants were returned by Zoom for this meeting and date range.' : 'Attendance sync completed.',
+            'no_historical_attendance' => $noAttendance, 'meetings_retrieved' => count($meetingInstances),
+            'participants_retrieved' => $participantsRetrieved, 'matched' => $matched, 'unmatched' => $unmatched,
+            'occurrences' => count($meetingInstances), 'last_synced_at' => $session->last_synced_at]);
     }
 
     public function attendance(ZoomBatch $batch, ZoomSession $session)

@@ -35,6 +35,47 @@ it('tests the saved Zoom connection without returning credentials or access toke
         ->assertJsonMissing(['access_token' => 'private-token-value']);
 });
 
+it('force refreshes only the cached Zoom token and obtains a new OAuth token', function () {
+    $tokenRequests = 0;
+    Http::fake(function ($request) use (&$tokenRequests) {
+        if ($request->url() === 'https://zoom.us/oauth/token') {
+            $tokenRequests++;
+            return Http::response(['access_token' => $tokenRequests === 1 ? 'old-private-token' : 'new-private-token', 'expires_in' => 3600], 200);
+        }
+        if ($request->url() === 'https://api.zoom.us/v2/users/me') return Http::response(['id' => 'host-1'], 200);
+        return Http::response([], 404);
+    });
+    app(\App\Services\ZoomApiService::class)->testConnection();
+    $admin = zoomIntegrationUser('admin', 'zoom-admin-refresh@example.test');
+    $this->actingAs($admin)->postJson('/api/admin/zoom/refresh-token')->assertOk()
+        ->assertJsonPath('refreshed', true)->assertJsonMissing(['access_token' => 'new-private-token']);
+    expect($tokenRequests)->toBe(2);
+    Http::assertSent(fn ($request) => $request->url() === 'https://api.zoom.us/v2/users/me' && $request->hasHeader('Authorization', 'Bearer old-private-token'));
+});
+
+it('diagnoses fresh token and API connectivity without claiming that scopes were verified', function () {
+    Http::fake([
+        'https://zoom.us/oauth/token' => Http::response(['access_token' => 'private-diagnostic-token', 'expires_in' => 3600], 200),
+        'https://api.zoom.us/v2/users/me' => Http::response(['id' => 'host-1', 'display_name' => 'Zoom Host'], 200),
+    ]);
+    $admin = zoomIntegrationUser('admin', 'zoom-admin-diagnostics@example.test');
+    $this->actingAs($admin)->postJson('/api/admin/zoom/diagnostics')->assertOk()
+        ->assertJsonPath('credentials_configured', true)->assertJsonPath('token_obtained', true)
+        ->assertJsonPath('api_connected', true)->assertJsonPath('scopes_verified', false)
+        ->assertJsonMissing(['access_token' => 'private-diagnostic-token']);
+});
+
+it('returns the sanitized Zoom API error and status from the connection check', function () {
+    Http::fake([
+        'https://zoom.us/oauth/token' => Http::response(['access_token' => 'private-token-value', 'expires_in' => 3600], 200),
+        'https://api.zoom.us/v2/users/me' => Http::response(['code' => 200, 'message' => 'Insufficient permissions to access this resource.'], 403),
+    ]);
+    $admin = zoomIntegrationUser('admin', 'zoom-admin-api-error@example.test');
+    $this->actingAs($admin)->postJson('/api/admin/zoom/test-connection')->assertStatus(422)
+        ->assertJsonPath('connected', false)->assertJsonPath('http_status', 403)
+        ->assertJsonPath('message', 'Insufficient permissions to access this resource.');
+});
+
 it('creates a fixed-time recurring Zoom meeting and saves it against the batch', function () {
     Http::fake([
         'https://zoom.us/oauth/token' => Http::response(['access_token' => 'private-token-value', 'expires_in' => 3600], 200),
@@ -188,7 +229,8 @@ it('syncs recurring occurrence attendance, sums rejoin sessions, matches registr
     StudentZoomAssignment::create(['student_id' => $student->id, 'zoom_session_id' => $session->id, 'zoom_url' => 'https://zoom.us/r/student', 'is_active' => true, 'registrant_id' => 'registrant-one', 'pseudocode_snapshot' => $student->pseudocode, 'registration_status' => 'registered', 'registered_at' => now(), 'registration_source' => 'zoom_api']);
     $endpoint = "/api/admin/zoom/batches/{$batch->id}/sessions/{$session->id}/attendance/sync";
 
-    $this->actingAs($admin)->postJson($endpoint)->assertOk()->assertJsonPath('occurrences', 2)->assertJsonPath('matched', 3)->assertJsonPath('unmatched', 1);
+    $this->actingAs($admin)->postJson($endpoint)->assertOk()->assertJsonPath('occurrences', 2)->assertJsonPath('meetings_retrieved', 2)
+        ->assertJsonPath('participants_retrieved', 4)->assertJsonPath('matched', 3)->assertJsonPath('unmatched', 1);
     expect(ZoomAttendanceRecord::query()->where('zoom_session_id', $session->id)->count())->toBe(4)
         ->and(ZoomAttendanceRecord::query()->where('zoom_meeting_uuid', 'occurrence-one')->where('student_id', $student->id)->sum('duration_seconds'))->toBe(300)
         ->and(ZoomAttendanceRecord::query()->where('zoom_meeting_uuid', 'occurrence-two')->where('student_id', $student->id)->value('participant_pseudocode'))->toBe($student->pseudocode)

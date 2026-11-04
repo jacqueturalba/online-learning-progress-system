@@ -10,6 +10,8 @@ const students = ref<StudentRow[]>([]);
 const search = ref(''), status = ref('all'), page = ref(1), lastPage = ref(1), total = ref(0);
 const loading = ref(false), savingCredentials = ref(false), error = ref(''), notice = ref('');
 const testingConnection = ref(false);
+const refreshingToken = ref(false);
+const diagnostic = ref<Record<string, any> | null>(null);
 async function readResponse(response: Response) {
   const text = await response.text();
   let data: Record<string, any> = {};
@@ -51,13 +53,24 @@ async function saveCredentials(event: Event) {
   finally { savingCredentials.value = false; }
 }
 async function testConnection() {
-  testingConnection.value = true; error.value = ''; notice.value = '';
+  testingConnection.value = true; error.value = ''; notice.value = ''; diagnostic.value = null;
   try {
-    const response = await fetch('/api/admin/zoom/test-connection', { method: 'POST', credentials: 'same-origin', headers: { Accept: 'application/json', 'X-CSRF-TOKEN': csrf() } });
-    const data = await readResponse(response);
-    notice.value = data.message;
+    const response = await fetch('/api/admin/zoom/diagnostics', { method: 'POST', credentials: 'same-origin', headers: { Accept: 'application/json', 'X-CSRF-TOKEN': csrf() } });
+    const data = await response.json().catch(() => ({}));
+    diagnostic.value = data;
+    if (!response.ok && !data.error) error.value = data.message || `Diagnostics failed (${response.status}).`;
   } catch (caught) { error.value = (caught as Error).message; }
   finally { testingConnection.value = false; }
+}
+async function refreshToken() {
+  refreshingToken.value = true; error.value = ''; notice.value = ''; diagnostic.value = null;
+  try {
+    const response = await fetch('/api/admin/zoom/refresh-token', { method: 'POST', credentials: 'same-origin', headers: { Accept: 'application/json', 'X-CSRF-TOKEN': csrf() } });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(`${data.message || 'Token refresh failed.'}${data.http_status ? ` (Zoom HTTP ${data.http_status})` : ''}`);
+    notice.value = data.message;
+  } catch (caught) { error.value = (caught as Error).message; }
+  finally { refreshingToken.value = false; }
 }
 function filterChanged() { page.value = 1; void load(); }
 let searchTimer: ReturnType<typeof setTimeout>;
@@ -76,8 +89,9 @@ onMounted(() => { void load(); });
         <label>Account ID<input name="account_id" type="password" autocomplete="new-password" maxlength="255" :required="!credentialsConfigured" :placeholder="credentialsConfigured ? 'Leave blank to keep current value' : 'Zoom account ID'"></label>
         <label>Client ID<input name="client_id" type="password" autocomplete="new-password" maxlength="255" :required="!credentialsConfigured" :placeholder="credentialsConfigured ? 'Leave blank to keep current value' : 'Zoom client ID'"></label>
         <label>Client secret<input name="client_secret" type="password" autocomplete="new-password" maxlength="255" :required="!credentialsConfigured" :placeholder="credentialsConfigured ? 'Leave blank to keep current value' : 'Zoom client secret'"></label>
-        <div class="zoom-credentials-footer"><span>Last updated: {{ formatDate(credentialsUpdatedAt) }}</span><div><button v-if="credentialsConfigured" type="button" class="secondary-button" :disabled="testingConnection" @click="testConnection">{{ testingConnection ? 'Testing…' : 'Test connection' }}</button><button class="primary" :disabled="savingCredentials">{{ savingCredentials ? 'Saving…' : credentialsConfigured ? 'Update credentials' : 'Save credentials' }}</button></div></div>
+        <div class="zoom-credentials-footer"><span>Last updated: {{ formatDate(credentialsUpdatedAt) }}</span><div><button v-if="credentialsConfigured" type="button" class="secondary-button" :disabled="refreshingToken" @click="refreshToken">{{ refreshingToken ? 'Refreshing…' : 'Refresh OAuth token' }}</button><button v-if="credentialsConfigured" type="button" class="secondary-button" :disabled="testingConnection" @click="testConnection">{{ testingConnection ? 'Checking…' : 'Run diagnostics' }}</button><button class="primary" :disabled="savingCredentials">{{ savingCredentials ? 'Saving…' : credentialsConfigured ? 'Update credentials' : 'Save credentials' }}</button></div></div>
       </form>
+      <div v-if="diagnostic" class="zoom-diagnostic-results" role="status"><h3>Zoom connection diagnostics</h3><p>Credentials: <strong>{{ diagnostic.credentials_configured ? 'Configured' : 'Missing' }}</strong></p><p>Fresh OAuth token: <strong>{{ diagnostic.token_obtained ? 'Obtained' : 'Failed' }}</strong></p><p>Zoom API connection: <strong>{{ diagnostic.api_connected ? `Connected${diagnostic.account ? ` as ${diagnostic.account}` : ''}` : 'Failed' }}</strong></p><p>Required scopes: <strong>Not independently verified</strong> · {{ diagnostic.scope_message }}</p><p v-if="diagnostic.error" class="student-error">{{ diagnostic.error }}<span v-if="diagnostic.http_status"> (HTTP {{ diagnostic.http_status }})</span></p></div>
     </section>
 
     <AdminZoomBatches />
