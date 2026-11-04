@@ -5,11 +5,17 @@ test('lesson upload reports progress, disables duplicate submits, and retains fi
     const fileSize = Object.getOwnPropertyDescriptor(File.prototype, 'size');
     Object.defineProperty(File.prototype, 'size', {
       configurable: true,
-      get() { return this.name === 'too-large.mp4' ? 1000 * 1024 * 1024 + 1 : fileSize?.get?.call(this); },
+      get() {
+        if (this.name === '785.188-mb.mp4') return 785_188_000;
+        if (this.name === 'exact-limit.mp4') return 1000 * 1024 * 1024;
+        if (this.name === 'too-large.mp4') return 1000 * 1024 * 1024 + 1;
+        return fileSize?.get?.call(this);
+      },
     });
   });
   await page.route('**/api/me', route => route.fulfill({ json: { user: { id: 1, name: 'Admin', email: 'admin@example.test', role: 'admin' } } }));
   await page.route('**/api/admin/dashboard', route => route.fulfill({ json: { total_students: 0, active_students: 0, total_lessons: 0, completed_lessons: 0, transfer_eligible_students: 0, students_by_category: [], recent_activity: [] } }));
+  await page.route('**/login', route => route.fulfill({ status: 200, json: { user: { id: 1, role: 'admin' } } }));
   let createCount = 0;
   await page.route('**/api/admin/lessons**', async route => {
     if (route.request().method() !== 'POST') return route.fulfill({ json: {
@@ -18,7 +24,8 @@ test('lesson upload reports progress, disables duplicate submits, and retains fi
     } });
     createCount++;
     await new Promise(resolve => setTimeout(resolve, 1200));
-    if (createCount === 1) return route.fulfill({ status: 201, json: { lesson: { id: 1 } } });
+    if (createCount <= 2) return route.fulfill({ status: 201, json: { lesson: { id: createCount } } });
+    if (createCount === 4) return route.fulfill({ status: 413, json: { message: 'Request body too large' } });
     return route.fulfill({ status: 422, json: { message: 'The given data was invalid.', errors: { video: ['The video field must be a file of type: mp4, mov, webm, m4v, avi.'] } } });
   });
 
@@ -30,7 +37,7 @@ test('lesson upload reports progress, disables duplicate submits, and retains fi
   await page.goto('/admin/lessons');
   await page.locator('.lesson-editor-form select').selectOption('1');
   await page.getByLabel('Title').fill('First upload');
-  await page.getByLabel('Video Upload').setInputFiles({ name: 'first.mp4', mimeType: 'video/mp4', buffer: Buffer.alloc(3 * 1024 * 1024) });
+  await page.getByLabel('Video Upload').setInputFiles({ name: '785.188-mb.mp4', mimeType: 'video/mp4', buffer: Buffer.alloc(1024) });
   await page.getByRole('button', { name: 'Add lesson' }).click();
 
   const progress = page.getByRole('progressbar', { name: 'Video upload progress' });
@@ -38,6 +45,12 @@ test('lesson upload reports progress, disables duplicate submits, and retains fi
   await expect(page.getByRole('button', { name: 'Uploading…' })).toBeDisabled();
   await expect(progress).toHaveAttribute('max', '100');
   await expect(page.getByRole('status')).toContainText(/Uploading video · \d+%/);
+  await expect(page.getByRole('status')).toContainText('Lesson added.', { timeout: 5000 });
+
+  await page.locator('.lesson-editor-form select').selectOption('1');
+  await page.getByLabel('Title').fill('Exact limit upload');
+  await page.getByLabel('Video Upload').setInputFiles({ name: 'exact-limit.mp4', mimeType: 'video/mp4', buffer: Buffer.alloc(1024) });
+  await page.getByRole('button', { name: 'Add lesson' }).click();
   await expect(page.getByRole('status')).toContainText('Lesson added.', { timeout: 5000 });
 
   await page.locator('.lesson-editor-form select').selectOption('1');
@@ -52,7 +65,11 @@ test('lesson upload reports progress, disables duplicate submits, and retains fi
   await expect(page.getByRole('alert')).toContainText('Unsupported video type. Choose an MP4, MOV, WebM, M4V, or AVI file.');
   await expect(page.getByLabel('Title')).toHaveValue('Keep these details');
   await expect(page.getByLabel('Video Upload')).toHaveValue(/second\.mp4/);
-  expect(createCount).toBe(2);
+
+  await page.getByLabel('Video Upload').setInputFiles({ name: 'server-rejected.mp4', mimeType: 'video/mp4', buffer: Buffer.alloc(1024) });
+  await page.getByRole('button', { name: 'Add lesson' }).click();
+  await expect(page.getByRole('alert')).toContainText('request-body limit is below the upload size');
+  expect(createCount).toBe(4);
 });
 
 test('student playback uses the protected stream, hides download controls, and resumes and seeks', async ({ page }) => {

@@ -322,15 +322,42 @@ it('manages lesson search, status, ordering, and video publication validation', 
     expect($first->fresh()->sort_order)->toBe(2);
 });
 
-it('accepts a lesson video larger than 100 MB within the configured size limit', function () {
+it('accepts the reported 785.188 MB lesson video within the 1000 MB limit', function () {
     $category = makeCategory();
-    $video = UploadedFile::fake()->create('large-lesson.mp4', 163 * 1024, 'video/mp4');
+    $video = UploadedFile::fake()->create('large-lesson.mp4', 0, 'video/mp4');
+    $video->sizeToReport = 785_188_000;
 
     $this->actingAs(makeAdmin())->post('/api/admin/lessons', [
         'category_id' => $category->id,
         'title' => 'Large lesson upload',
         'video' => $video,
     ])->assertCreated()->assertJsonPath('lesson.title', 'Large lesson upload');
+});
+
+it('accepts a video exactly at the 1000 MiB application limit and rejects one byte over', function () {
+    $category = makeCategory();
+    $atLimit = UploadedFile::fake()->create('at-limit.mp4', 0, 'video/mp4');
+    $atLimit->sizeToReport = 1000 * 1024 * 1024;
+    $this->actingAs(makeAdmin())->post('/api/admin/lessons', [
+        'category_id' => $category->id, 'title' => 'At size limit', 'video' => $atLimit,
+    ])->assertCreated();
+
+    $overLimit = UploadedFile::fake()->create('over-limit.mp4', 0, 'video/mp4');
+    $overLimit->sizeToReport = 1000 * 1024 * 1024 + 1;
+    $this->withHeader('Accept', 'application/json')->post('/api/admin/lessons', [
+        'category_id' => $category->id, 'title' => 'Over size limit', 'video' => $overLimit,
+    ])->assertUnprocessable()->assertJsonPath('errors.video.0', 'The video is too large. Choose a file no larger than 1000 MB.');
+});
+
+it('reports the active PHP file upload limit when PHP rejects the video before Laravel validation', function () {
+    $category = makeCategory();
+    $temporaryPath = tempnam(sys_get_temp_dir(), 'upload-error-');
+    file_put_contents($temporaryPath, 'x');
+    $upload = new \Illuminate\Http\UploadedFile($temporaryPath, 'php-limit.mp4', 'video/mp4', UPLOAD_ERR_INI_SIZE, true);
+
+    $this->actingAs(makeAdmin())->postJson('/api/admin/lessons', [
+        'category_id' => $category->id, 'title' => 'PHP limited upload', 'video' => $upload,
+    ])->assertUnprocessable()->assertJsonPath('errors.video.0', 'The video exceeds the active PHP upload_max_filesize setting ('.(ini_get('upload_max_filesize') ?: 'unknown').').');
 });
 
 it('stores lesson videos privately and serves authorized byte ranges without changing progress on replacement', function () {

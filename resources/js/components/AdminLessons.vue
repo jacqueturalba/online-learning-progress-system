@@ -3,6 +3,7 @@ import { onMounted, reactive, ref } from 'vue';
 
 type Category = { id: number; name: string; deleted_at: string | null };
 type Lesson = { id: number; category_id: number; title: string; description: string | null; video_stream_url: string | null; duration_seconds: number | null; sort_order: number; is_published: boolean; deleted_at: string | null; progress_count: number; category?: Category };
+const MAX_VIDEO_SIZE_BYTES = 1000 * 1024 * 1024;
 const csrf = () => document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content || '';
 const lessons = ref<Lesson[]>([]), categories = ref<Category[]>([]), total = ref(0), loading = ref(false), saving = ref(false), uploading = ref(false), uploadPercent = ref<number | null>(null), error = ref(''), notice = ref('');
 const search = ref(''), categoryId = ref(''), status = ref('all'), page = ref(1), lastPage = ref(1), editing = ref<number | null>(null);
@@ -40,7 +41,7 @@ function uploadRequest(url: string, body: FormData) {
       }
       if (xhr.status >= 200 && xhr.status < 300) resolve(data);
       else if (xhr.status === 413) {
-        reject(new Error('Upload failed because the video is too large. Maximum allowed size is 1000 MB.'));
+        reject(new Error('The server rejected this request because its request-body limit is below the upload size. Check the web server, proxy/CDN, and PHP post_max_size limits.'));
       } else {
         const videoErrors = data.errors?.video as string[] | undefined;
         let message = Object.values(data.errors || {}).flat()[0] as string | undefined;
@@ -65,7 +66,7 @@ function chooseVideo(event: Event) {
     input.value = '';
     return;
   }
-  if (file.size > 1000 * 1024 * 1024) {
+  if (file.size > MAX_VIDEO_SIZE_BYTES) {
     error.value = 'The video is too large. Choose a file no larger than 1000 MB.';
     input.value = '';
     return;
