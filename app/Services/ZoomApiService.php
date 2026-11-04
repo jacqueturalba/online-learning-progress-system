@@ -45,7 +45,7 @@ class ZoomApiService
             $user = $this->testConnection();
             return ['credentials_configured' => true, 'token_obtained' => true, 'api_connected' => true,
                 'account' => $user['display_name'] ?? $user['email'] ?? null, 'scopes_verified' => false,
-                'scope_message' => 'Token generation and API access succeeded. Zoom does not expose granted scopes through this diagnostic; verify report:read:admin and meeting:read (or meeting:read:admin) in the Zoom app.'];
+                'scope_message' => 'Zoom does not expose granted scopes through this diagnostic. Verify report:read:list_history_meetings:admin and meeting:read:list_past_participants:admin (or the corresponding classic scopes) in the Zoom app. This sync gets occurrence UUIDs from history_meetings, so it does not require the separate list_past_instances scope.'];
         } catch (ZoomApiException $exception) {
             return ['credentials_configured' => true, 'token_obtained' => true, 'api_connected' => false,
                 'http_status' => $exception->httpStatus, 'error' => $exception->getMessage(), 'scopes_verified' => false,

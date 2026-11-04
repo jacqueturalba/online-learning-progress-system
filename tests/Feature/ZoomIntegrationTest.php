@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Carbon\Carbon;
 
 uses(RefreshDatabase::class);
 
@@ -201,6 +202,53 @@ it('transfers a student while retaining the previous membership and meeting assi
         ->and(ZoomBatchMembership::query()->where('zoom_batch_id', $target->id)->where('student_id', $student->id)->where('status', 'active')->exists())->toBeTrue()
         ->and($session->fresh()->zoom_meeting_id)->toBe('12345678903')
         ->and($registration->fresh()->is_active)->toBeFalse();
+});
+
+it('defaults a future-scheduled recurring meeting to a valid historical range and imports its separate completed UUIDs', function () {
+    Carbon::setTestNow(Carbon::parse('2026-11-04 12:00:00', 'Asia/Manila'));
+    try {
+        $historyQueries = [];
+        Http::fake(function ($request) use (&$historyQueries) {
+            if ($request->url() === 'https://zoom.us/oauth/token') return Http::response(['access_token' => 'private-token-value', 'expires_in' => 3600], 200);
+            if (str_contains($request->url(), '/report/history_meetings')) {
+                parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+                $historyQueries[] = $query;
+                return str_starts_with((string) ($query['from'] ?? ''), '2026-11-')
+                    ? Http::response(['history_meetings' => [
+                        ['meeting_id' => '83402342018', 'meeting_uuid' => 'nov-four-first', 'start_time' => '2026-11-04T01:00:00Z'],
+                        ['meeting_id' => '83402342018', 'meeting_uuid' => 'nov-four-second', 'start_time' => '2026-11-04T03:00:00Z'],
+                        ['meeting_id' => '83402342018', 'meeting_uuid' => 'nov-six-future', 'start_time' => '2026-11-06T01:00:00Z'],
+                    ]], 200)
+                    : Http::response(['history_meetings' => []], 200);
+            }
+            if (str_contains($request->url(), '/past_meetings/nov-four-first/participants')) return Http::response(['participants' => [['participant_user_id' => 'one', 'name' => 'Unmatched one', 'join_time' => '2026-11-04T01:05:00Z', 'leave_time' => '2026-11-04T01:55:00Z', 'duration' => 3000]]], 200);
+            if (str_contains($request->url(), '/past_meetings/nov-four-second/participants')) return Http::response(['participants' => [['participant_user_id' => 'two', 'name' => 'Unmatched two', 'join_time' => '2026-11-04T03:05:00Z', 'leave_time' => '2026-11-04T03:55:00Z', 'duration' => 3000]]], 200);
+            return Http::response([], 404);
+        });
+
+        $admin = zoomIntegrationUser('admin', 'zoom-admin-future-schedule@example.test');
+        $batch = ZoomBatch::create(['name' => 'Batch 01', 'created_by' => $admin->id]);
+        $session = ZoomSession::create(['zoom_batch_id' => $batch->id, 'title' => 'Head Ins Oh - Batch 01 Zoom Meeting',
+            'meeting_url' => 'https://zoom.us/j/83402342018', 'scheduled_at' => '2026-11-06 09:00:00',
+            'zoom_meeting_id' => '83402342018', 'zoom_meeting_type' => 8, 'registration_type' => 1]);
+
+        $endpoint = "/api/admin/zoom/batches/{$batch->id}/sessions/{$session->id}/attendance/sync";
+        $this->actingAs($admin)->postJson($endpoint, ['from' => '2026-11-06', 'to' => '2026-11-06'])
+            ->assertUnprocessable()->assertJsonPath('message', 'Choose a valid date range within Zoom’s 15-month attendance history window.');
+        $response = $this->postJson($endpoint);
+        $response->assertOk()->assertJsonPath('meetings_retrieved', 2)->assertJsonPath('participants_retrieved', 2)
+            ->assertJsonPath('matched', 0)->assertJsonPath('unmatched', 2);
+        expect(ZoomAttendanceRecord::query()->where('zoom_session_id', $session->id)->count())->toBe(2)
+            ->and(ZoomAttendanceRecord::query()->where('zoom_session_id', $session->id)->distinct('zoom_meeting_uuid')->count('zoom_meeting_uuid'))->toBe(2)
+            ->and(count($historyQueries))->toBeGreaterThan(0)
+            ->and(collect($historyQueries)->every(fn ($query) => $query['from'] <= $query['to'] && $query['to'] <= '2026-11-04'))->toBeTrue();
+        $report = $this->getJson('/api/admin/reports?report=meeting_attendance&meeting_id='.$session->id.'&date_from=2026-11-04&date_to=2026-11-04')->assertOk();
+        expect($report->json('rows.total'))->toBe(2)
+            ->and($report->json('attendance_summary.occurrence_count'))->toBe(2)
+            ->and(collect($report->json('rows.data'))->pluck('occurrence_uuid')->unique()->sort()->values()->all())->toBe(['nov-four-first', 'nov-four-second']);
+    } finally {
+        Carbon::setTestNow();
+    }
 });
 
 it('syncs recurring occurrence attendance, sums rejoin sessions, matches registrants and pseudocodes, and deduplicates repeated syncs', function () {

@@ -245,11 +245,19 @@ class AdminZoomBatchController extends Controller
     {
         abort_unless((int) $session->zoom_batch_id === (int) $batch->id && $session->zoom_meeting_id, 404);
         $range = $request->validate(['from' => ['nullable', 'date_format:Y-m-d'], 'to' => ['nullable', 'date_format:Y-m-d']]);
-        $from = $range['from'] ?? Carbon::parse($session->scheduled_at)->max(now()->subMonths(14))->toDateString();
-        $to = $range['to'] ?? now()->toDateString();
-        if ($to < $from || Carbon::parse($from)->diffInMonths(Carbon::parse($to)) > 14) {
+        $timezone = config('app.timezone');
+        $today = Carbon::today($timezone);
+        $oldestAllowed = $today->copy()->subMonths(15);
+        $scheduledDate = $session->scheduled_at ? Carbon::parse($session->scheduled_at)->timezone($timezone)->startOfDay() : null;
+        $defaultFrom = $scheduledDate && $scheduledDate->lte($today) ? $scheduledDate->max($oldestAllowed) : $oldestAllowed;
+        $fromDate = isset($range['from']) ? Carbon::createFromFormat('Y-m-d', $range['from'], $timezone)->startOfDay() : $defaultFrom;
+        $toDate = isset($range['to']) ? Carbon::createFromFormat('Y-m-d', $range['to'], $timezone)->startOfDay() : $today;
+        if (! isset($range['from']) && $fromDate->gt($toDate)) $fromDate = $oldestAllowed;
+        if ($fromDate->gt($toDate) || $toDate->gt($today) || $fromDate->lt($oldestAllowed)) {
             return response()->json(['message' => 'Choose a valid date range within Zoom’s 15-month attendance history window.'], 422);
         }
+        $from = $fromDate->toDateString();
+        $to = $toDate->toDateString();
         $meetingInstances = [];
         $participantsRetrieved = 0;
         $matched = 0;
@@ -266,6 +274,7 @@ class AdminZoomBatchController extends Controller
                     $page = $zoom->historyMeetings($windowFrom, $windowTo, $token, (string) $session->zoom_meeting_id);
                     foreach ($page['history_meetings'] ?? [] as $meeting) {
                         if ((string) ($meeting['meeting_id'] ?? '') === (string) $session->zoom_meeting_id && ! empty($meeting['meeting_uuid'])) {
+                            if (! empty($meeting['start_time']) && Carbon::parse($meeting['start_time'])->gt(now())) continue;
                             $meetingInstances[$meeting['meeting_uuid']] = $meeting;
                         }
                     }
@@ -312,8 +321,9 @@ class AdminZoomBatchController extends Controller
                         $record = ZoomAttendanceRecord::query()->firstOrNew([
                             'zoom_session_id' => $session->id, 'zoom_meeting_uuid' => (string) $uuid, 'dedupe_key' => $dedupeKey,
                         ]);
+                        $preserveManualMatch = $record->exists && $record->match_status === 'manually_matched';
                         $record->fill([
-                            'student_id' => $student?->id,
+                            'student_id' => $preserveManualMatch ? $record->student_id : $student?->id,
                             'registrant_id' => $registrantId,
                             'participant_id' => $participantId,
                             'participant_pseudocode' => $assignment?->pseudocode_snapshot ?: $pseudocode,
@@ -322,12 +332,12 @@ class AdminZoomBatchController extends Controller
                             'joined_at' => $joinedAt,
                             'left_at' => $leftAt,
                             'duration_seconds' => $duration,
-                            'match_status' => $student ? 'matched' : 'unmatched',
-                            'matching_method' => $matchMethod,
+                            'match_status' => $preserveManualMatch ? 'manually_matched' : ($student ? 'matched' : 'unmatched'),
+                            'matching_method' => $preserveManualMatch ? $record->matching_method : $matchMethod,
                             'raw_data' => ['occurrence_start_time' => $occurrence['start_time'] ?? null, 'participant' => $participant],
                         ]);
                         $record->save();
-                        $student ? $matched++ : $unmatched++;
+                        ($preserveManualMatch || $student) ? $matched++ : $unmatched++;
                     }
                     $token = $page['next_page_token'] ?? null;
                 } while ($token);
@@ -344,7 +354,7 @@ class AdminZoomBatchController extends Controller
                 $exception->httpStatus === 429 => 'rate_limited',
                 default => 'zoom_api_error',
             };
-            if ($category === 'missing_permissions') $message .= ' Check report:read:admin and meeting:read (or meeting:read:admin) in the Zoom app.';
+            if ($category === 'missing_permissions') $message .= ' Check report:read:list_history_meetings:admin and meeting:read:list_past_participants:admin (or the corresponding classic admin scopes) in the Zoom app.';
             return response()->json(['message' => $message, 'category' => $category, 'zoom_http_status' => $exception->httpStatus,
                 'meetings_retrieved' => count($meetingInstances), 'participants_retrieved' => $participantsRetrieved,
                 'matched' => $matched, 'unmatched' => $unmatched], 422);
