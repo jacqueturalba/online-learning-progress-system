@@ -97,8 +97,24 @@ class AdminZoomController extends Controller
             $user = $zoom->testConnection();
             return response()->json(['connected' => true, 'message' => 'Connected to Zoom as '.($user['display_name'] ?? $user['email'] ?? 'the configured account').'.']);
         } catch (ZoomApiException $exception) {
-            return response()->json(['connected' => false, 'message' => $exception->getMessage()], 422);
+            return response()->json(['connected' => false, 'http_status' => $exception->httpStatus, 'message' => $exception->getMessage()], 422);
         }
+    }
+
+    public function refreshToken(ZoomApiService $zoom)
+    {
+        try {
+            $zoom->refreshToken();
+            return response()->json(['refreshed' => true, 'message' => 'A fresh Zoom OAuth token was obtained.']);
+        } catch (ZoomApiException $exception) {
+            return response()->json(['refreshed' => false, 'http_status' => $exception->httpStatus, 'message' => $exception->getMessage()], 422);
+        }
+    }
+
+    public function diagnoseConnection(ZoomApiService $zoom)
+    {
+        $result = $zoom->diagnoseConnection();
+        return response()->json($result, $result['api_connected'] ? 200 : 422);
     }
 
     public function saveAssignment(Request $request, int $student)

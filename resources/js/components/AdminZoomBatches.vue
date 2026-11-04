@@ -25,7 +25,9 @@ async function responseData(response: Response) {
   try { data = text ? JSON.parse(text) : {}; } catch { /* Server HTML should not be shown as an error message. */ }
   if (!response.ok) {
     const validation = data.errors && Object.values(data.errors).flat()[0];
-    throw new Error(typeof data.message === 'string' ? data.message : typeof validation === 'string' ? validation : `Request failed (${response.status}).`);
+    const detail = typeof data.message === 'string' ? data.message : typeof validation === 'string' ? validation : `Request failed (${response.status}).`;
+    const zoomStatus = data.zoom_http_status ? ` (Zoom HTTP ${data.zoom_http_status}; ${data.category || 'API error'}. Retrieved ${data.meetings_retrieved ?? 0} meetings/occurrences and ${data.participants_retrieved ?? 0} participants; ${data.matched ?? 0} matched, ${data.unmatched ?? 0} unmatched.)` : '';
+    throw new Error(detail + zoomStatus);
   }
   return data;
 }
@@ -56,9 +58,9 @@ async function syncAttendance() {
   syncingAttendance.value = true; error.value = ''; message.value = '';
   try {
     const data = await request(`/api/admin/zoom/batches/${batch.value.id}/sessions/${batch.value.session.id}/attendance/sync`, 'POST');
-    message.value = `Attendance sync completed: ${data.occurrences} occurrences, ${data.matched} matched and ${data.unmatched} unmatched participant sessions.`;
+    message.value = `${data.message} Meetings/occurrences: ${data.meetings_retrieved}. Participants: ${data.participants_retrieved}. Matched: ${data.matched}; unmatched: ${data.unmatched}.`;
     await openBatch(batch.value.id);
-  } catch (caught) { error.value = (caught as Error).message; }
+  } catch (caught) { const responseError = caught as Error & { status?: number }; error.value = responseError.message; }
   finally { syncingAttendance.value = false; }
 }
 async function saveBatch() {

@@ -17,6 +17,48 @@ class ZoomApiService
         return $this->request('GET', '/users/me');
     }
 
+    /** Fetch and cache a new OAuth token without changing the saved credentials. */
+    public function refreshToken(): void
+    {
+        $this->forgetToken();
+        $this->accessToken();
+    }
+
+    /** Force a fresh token, then verify it against a lightweight authenticated API call. */
+    public function diagnoseConnection(): array
+    {
+        $configured = $this->credentialsConfigured();
+        if (! $configured) {
+            return ['credentials_configured' => false, 'token_obtained' => false, 'api_connected' => false,
+                'scopes_verified' => false, 'scope_message' => 'Granted scopes cannot be independently verified by this diagnostic.'];
+        }
+
+        try {
+            $this->refreshToken();
+        } catch (ZoomApiException $exception) {
+            return ['credentials_configured' => true, 'token_obtained' => false, 'api_connected' => false,
+                'http_status' => $exception->httpStatus, 'error' => $exception->getMessage(), 'scopes_verified' => false,
+                'scope_message' => 'Granted scopes cannot be independently verified because token generation failed.'];
+        }
+
+        try {
+            $user = $this->testConnection();
+            return ['credentials_configured' => true, 'token_obtained' => true, 'api_connected' => true,
+                'account' => $user['display_name'] ?? $user['email'] ?? null, 'scopes_verified' => false,
+                'scope_message' => 'Token generation and API access succeeded. Zoom does not expose granted scopes through this diagnostic; verify report:read:admin and meeting:read (or meeting:read:admin) in the Zoom app.'];
+        } catch (ZoomApiException $exception) {
+            return ['credentials_configured' => true, 'token_obtained' => true, 'api_connected' => false,
+                'http_status' => $exception->httpStatus, 'error' => $exception->getMessage(), 'scopes_verified' => false,
+                'scope_message' => 'Granted scopes cannot be independently verified because the API check failed.'];
+        }
+    }
+
+    public function credentialsConfigured(): bool
+    {
+        $settings = ZoomIntegrationSetting::query()->first();
+        return (bool) ($settings?->account_id && $settings?->client_id && $settings?->client_secret);
+    }
+
     public function users(): array
     {
         $users = [];
@@ -73,7 +115,7 @@ class ZoomApiService
         if (! $response->successful()) {
             $body = $response->json();
             $message = is_array($body) ? ($body['message'] ?? $body['reason'] ?? null) : null;
-            $safeMessage = is_string($message) ? mb_substr($message, 0, 240) : 'Zoom rejected the request.';
+            $safeMessage = $this->sanitizeError(is_string($message) ? mb_substr($message, 0, 240) : 'Zoom rejected the request.');
             Log::warning('Zoom API request failed.', ['path' => $path, 'status' => $response->status(), 'zoom_message' => $safeMessage]);
             throw new ZoomApiException($safeMessage, $response->status());
         }
@@ -99,7 +141,7 @@ class ZoomApiService
             throw new ZoomApiException('Save complete Zoom Server-to-Server credentials before connecting.');
         }
 
-        $key = 'zoom.s2s.token.'.hash('sha256', $settings->account_id.'|'.$settings->client_id.'|'.hash('sha256', $settings->client_secret));
+        $key = $this->tokenCacheKey($settings);
         return Cache::remember($key, now()->addMinutes(55), function () use ($settings): string {
             try {
                 $response = Http::asForm()->withBasicAuth($settings->client_id, $settings->client_secret)
@@ -125,6 +167,21 @@ class ZoomApiService
     private function forgetToken(): void
     {
         $settings = ZoomIntegrationSetting::query()->first();
-        if ($settings) Cache::forget('zoom.s2s.token.'.hash('sha256', $settings->account_id.'|'.$settings->client_id.'|'.hash('sha256', $settings->client_secret)));
+        if ($settings) Cache::forget($this->tokenCacheKey($settings));
+    }
+
+    private function tokenCacheKey(ZoomIntegrationSetting $settings): string
+    {
+        return 'zoom.s2s.token.'.hash('sha256', $settings->account_id.'|'.$settings->client_id.'|'.hash('sha256', $settings->client_secret));
+    }
+
+    private function sanitizeError(string $message): string
+    {
+        $settings = ZoomIntegrationSetting::query()->first();
+        foreach ([$settings?->account_id, $settings?->client_id, $settings?->client_secret] as $secret) {
+            if (is_string($secret) && $secret !== '') $message = str_replace($secret, '[redacted]', $message);
+        }
+        $message = preg_replace('/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/i', 'Bearer [redacted]', $message) ?? $message;
+        return mb_substr($message, 0, 240);
     }
 }
