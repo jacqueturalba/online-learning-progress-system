@@ -23,18 +23,16 @@ class LearningController extends Controller
                 'realizations' => fn ($realizations) => $realizations->where('student_id', $studentId),
             ]);
         }])->orderBy('sort_order')->orderBy('id')->get();
-        $canAccessNext = true;
-
-        $categories = $categories->map(function (Category $category) use (&$canAccessNext) {
+        $categories = $categories->map(function (Category $category) use ($studentId) {
             $completed = $category->lessons->filter(fn ($lesson) => $lesson->progress->contains('is_completed', true))->count();
-            $lessons = $category->lessons->map(function ($lesson) use (&$canAccessNext) {
+            $lessons = $category->lessons->map(function ($lesson) use ($studentId) {
                 $progress = $lesson->progress->first();
                 $hasRealization = $lesson->realizations->isNotEmpty();
-                $isUnlocked = $canAccessNext;
-                $canAccessNext = $canAccessNext && (bool) $progress?->is_completed && $hasRealization;
+                $isUnlocked = StudentLessonAccess::allows($studentId, $lesson->id);
 
                 return [
-                    'id' => $lesson->id,
+                'id' => $lesson->id,
+                    'thumbnail_url' => $lesson->thumbnail_path ? Storage::disk('public')->url($lesson->thumbnail_path) : null,
                     'title' => $lesson->title,
                     'description' => $lesson->description,
                     'video_stream_url' => $lesson->video_path && $isUnlocked ? route('lessons.video', $lesson) : null,
@@ -46,7 +44,7 @@ class LearningController extends Controller
                 ];
             });
 
-            return ['id' => $category->id, 'name' => $category->name, 'description' => $category->description, 'completed_lessons' => $completed, 'total_lessons' => $lessons->count(), 'progress_percentage' => $lessons->count() ? round($completed / $lessons->count() * 100, 1) : 0, 'lessons' => $lessons];
+            return ['id' => $category->id, 'name' => $category->name, 'description' => $category->description, 'thumbnail_url' => $category->thumbnail_path ? Storage::disk('public')->url($category->thumbnail_path) : null, 'background_color' => $category->background_color, 'enable_first_lesson_access' => $category->enable_first_lesson_access, 'unlock_all_lessons' => $category->unlock_all_lessons, 'completed_lessons' => $completed, 'total_lessons' => $lessons->count(), 'progress_percentage' => $lessons->count() ? round($completed / $lessons->count() * 100, 1) : 0, 'lessons' => $lessons];
         });
         return response()->json(['categories' => $categories]);
     }
@@ -167,7 +165,7 @@ class LearningController extends Controller
             $progress->last_watched_at = $now;
             $progress->is_playing = $data['is_playing'];
 
-            $complete = $progress->watched_seconds >= (int) ceil($duration * 0.9);
+            $complete = $progress->watched_seconds >= (int) ceil($duration * 0.5);
             if ($complete) {
                 $progress->is_completed = true;
                 $progress->completed_at ??= $now;

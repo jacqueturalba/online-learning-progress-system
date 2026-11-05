@@ -40,6 +40,10 @@ class BrandingController extends Controller
             'colors.text' => ['required', 'regex:/^#[0-9A-Fa-f]{6}$/'],
             'logo' => ['nullable', 'file', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048'],
             'remove_logo' => ['sometimes', 'boolean'],
+            'hero_image' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:5120'],
+            'remove_hero_image' => ['sometimes', 'boolean'],
+            'daily_verse_text' => ['nullable', 'string', 'max:1000'],
+            'daily_verse_reference' => ['nullable', 'string', 'max:120'],
         ], [
             'logo.image' => 'Choose a valid JPG, PNG, or WebP image for the logo.',
             'logo.mimes' => 'The logo must be a JPG, PNG, or WebP image.',
@@ -73,22 +77,29 @@ class BrandingController extends Controller
         })->validate();
 
         $oldLogo = SiteSetting::where('key', 'logo_path')->value('value');
+        $oldHero = SiteSetting::where('key', 'hero_image_path')->value('value');
         $newLogo = null;
+        $newHero = null;
         if ($request->hasFile('logo')) {
             $newLogo = $request->file('logo')->store('branding', 'public');
             if (!$newLogo) {
                 throw new \RuntimeException('The logo could not be stored. Please try again.');
             }
         }
+        if ($request->hasFile('hero_image')) $newHero = $request->file('hero_image')->store('branding', 'public');
+        $heroPath = $newHero ?? ($data['remove_hero_image'] ?? false ? null : $oldHero);
         $logoPath = $newLogo ?? ($data['remove_logo'] ?? false ? null : $oldLogo);
 
         try {
-            DB::transaction(function () use ($data, $logoPath): void {
+            DB::transaction(function () use ($data, $logoPath, $heroPath): void {
                 $values = [
                     'brand_name' => $data['brand_name'],
                     'brand_description' => $data['brand_description'] ?? '',
                     'colors' => json_encode($data['colors'], JSON_THROW_ON_ERROR),
                     'logo_path' => $logoPath,
+                    'hero_image_path' => $heroPath,
+                    'daily_verse_text' => $data['daily_verse_text'] ?? '',
+                    'daily_verse_reference' => $data['daily_verse_reference'] ?? '',
                 ];
                 foreach ($values as $key => $value) {
                     SiteSetting::updateOrCreate(['key' => $key], ['value' => $value]);
@@ -98,19 +109,21 @@ class BrandingController extends Controller
             if ($newLogo) {
                 Storage::disk('public')->delete($newLogo);
             }
+            if ($newHero) Storage::disk('public')->delete($newHero);
             throw $exception;
         }
 
         if (($newLogo || ($data['remove_logo'] ?? false)) && $oldLogo && $oldLogo !== $logoPath) {
             Storage::disk('public')->delete($oldLogo);
         }
+        if (($newHero || ($data['remove_hero_image'] ?? false)) && $oldHero && $oldHero !== $heroPath) Storage::disk('public')->delete($oldHero);
 
         return response()->json(['branding' => $this->branding(), 'message' => 'Branding settings saved.']);
     }
 
     private function branding(): array
     {
-        $stored = SiteSetting::query()->whereIn('key', ['brand_name', 'brand_description', 'colors', 'logo_path'])->pluck('value', 'key');
+        $stored = SiteSetting::query()->whereIn('key', ['brand_name', 'brand_description', 'colors', 'logo_path', 'hero_image_path', 'daily_verse_text', 'daily_verse_reference'])->pluck('value', 'key');
         $colors = json_decode($stored['colors'] ?? '', true);
 
         return [
@@ -118,6 +131,9 @@ class BrandingController extends Controller
             'brand_description' => $stored->get('brand_description') ?? self::DEFAULTS['brand_description'],
             'colors' => is_array($colors) ? array_merge(self::DEFAULTS['colors'], $colors) : self::DEFAULTS['colors'],
             'logo_url' => $stored->get('logo_path') ? Storage::disk('public')->url($stored->get('logo_path')) : null,
+            'hero_image_url' => $stored->get('hero_image_path') ? Storage::disk('public')->url($stored->get('hero_image_path')) : '/storage/branding/portal-login.png',
+            'daily_verse_text' => $stored->get('daily_verse_text') ?: 'Your word is a lamp to my feet and a light to my path.',
+            'daily_verse_reference' => $stored->get('daily_verse_reference') ?: 'Psalm 119:105',
         ];
     }
 

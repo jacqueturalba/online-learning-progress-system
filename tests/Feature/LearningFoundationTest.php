@@ -257,7 +257,7 @@ it('completes after server-timed playback and keeps one progress record on repea
         $this->travel(10)->seconds();
         $response = $this->putJson("/api/lessons/{$lesson->id}/progress", ['position_seconds' => $second, 'is_playing' => true]);
         $response->assertOk()->assertJsonPath('progress.watched_seconds', $second);
-        $response->assertJsonPath('progress.is_completed', $second >= 90);
+        $response->assertJsonPath('progress.is_completed', $second >= 50);
     }
 
     $completedAt = StudentLessonProgress::firstOrFail()->completed_at;
@@ -435,10 +435,52 @@ it('unlocks lessons in curriculum order only after verified completion and a sav
     $this->getJson('/api/learning')->assertJsonPath('categories.1.lessons.0.is_unlocked', false);
 
     StudentRealization::create(['student_id' => $student->id, 'lesson_id' => $basicLesson->id, 'realization' => 'I learned the fundamentals.', 'submitted_at' => now()]);
+    StudentCategoryProgress::create(['student_id' => $student->id, 'category_id' => $basic->id, 'started_at' => now(), 'completed_at' => now()]);
     $learning = $this->getJson('/api/learning')->assertOk();
     expect($learning->json('categories.1.lessons.0.is_unlocked'))->toBeTrue();
     expect($learning->json('categories.1.lessons.0.video_stream_url'))->toBe(route('lessons.video', $introLesson));
     $this->get(route('lessons.video', $introLesson))->assertOk();
+});
+
+it('enforces category access settings for first lesson, sequential lessons, and unlock all through protected endpoints', function () {
+    $student = makeStudent();
+    $admin = makeAdmin();
+    $category = makeCategory('Access rules');
+    $first = makeLesson($category, 'First', 1);
+    $second = makeLesson($category, 'Second', 2);
+    $third = makeLesson($category, 'Third', 3);
+    $nextCategory = Category::create(['name' => 'Next category', 'sort_order' => 2, 'is_active' => true]);
+    $nextLesson = makeLesson($nextCategory, 'Next category first lesson');
+
+    $this->actingAs($student)->getJson('/api/learning')->assertOk()
+        ->assertJsonPath('categories.0.lessons.0.is_unlocked', true)
+        ->assertJsonPath('categories.0.lessons.1.is_unlocked', false)
+        ->assertJsonPath('categories.1.lessons.0.is_unlocked', false);
+    $this->putJson("/api/lessons/{$second->id}/progress", ['position_seconds' => 0, 'is_playing' => false])->assertNotFound();
+    $this->actingAs($admin)->putJson("/api/admin/categories/{$nextCategory->id}", ['unlock_all_lessons' => true])->assertOk();
+    $this->actingAs($student)->getJson('/api/learning')->assertJsonPath('categories.1.lessons.0.is_unlocked', false);
+    $this->actingAs($admin)->putJson("/api/admin/categories/{$nextCategory->id}", ['unlock_all_lessons' => false, 'enable_first_lesson_access' => true])->assertOk();
+    $this->actingAs($student)->getJson('/api/learning')->assertJsonPath('categories.1.lessons.0.is_unlocked', true);
+    $this->actingAs($admin)->putJson("/api/admin/categories/{$nextCategory->id}", ['enable_first_lesson_access' => false])->assertOk();
+    $this->actingAs($student)->getJson('/api/learning')->assertJsonPath('categories.1.lessons.0.is_unlocked', false);
+
+    StudentLessonProgress::create(['student_id' => $student->id, 'lesson_id' => $first->id, 'watched_seconds' => 50, 'progress_percentage' => 50, 'is_completed' => true, 'completed_at' => now()]);
+    $this->getJson('/api/learning')->assertJsonPath('categories.0.lessons.1.is_unlocked', false);
+    StudentRealization::create(['student_id' => $student->id, 'lesson_id' => $first->id, 'realization' => 'Completed the first lesson.', 'submitted_at' => now()]);
+    $this->getJson('/api/learning')->assertJsonPath('categories.0.lessons.1.is_unlocked', true);
+
+    StudentLessonProgress::create(['student_id' => $student->id, 'lesson_id' => $second->id, 'watched_seconds' => 50, 'progress_percentage' => 50, 'is_completed' => true, 'completed_at' => now()]);
+    StudentRealization::create(['student_id' => $student->id, 'lesson_id' => $second->id, 'realization' => 'Completed the second lesson.', 'submitted_at' => now()]);
+    StudentLessonProgress::create(['student_id' => $student->id, 'lesson_id' => $third->id, 'watched_seconds' => 50, 'progress_percentage' => 50, 'is_completed' => true, 'completed_at' => now()]);
+    StudentCategoryProgress::create(['student_id' => $student->id, 'category_id' => $category->id, 'started_at' => now(), 'completed_at' => now()]);
+    $this->getJson('/api/learning')->assertJsonPath('categories.1.lessons.0.is_unlocked', true);
+
+    $this->actingAs($admin)->putJson("/api/admin/categories/{$category->id}", ['unlock_all_lessons' => true])->assertOk();
+    $this->actingAs($student)->getJson('/api/learning')->assertJsonPath('categories.0.lessons.2.is_unlocked', true);
+    $this->putJson("/api/lessons/{$third->id}/progress", ['position_seconds' => 10, 'is_playing' => false])->assertOk();
+
+    $this->actingAs($admin)->putJson("/api/admin/categories/{$category->id}", ['is_active' => false])->assertOk();
+    $this->actingAs($student)->putJson("/api/lessons/{$third->id}/progress", ['position_seconds' => 20, 'is_playing' => false])->assertNotFound();
 });
 it('archives lessons and categories that have progress instead of deleting history', function () {
     $admin = makeAdmin();
@@ -466,7 +508,7 @@ it('creates, orders, edits, archives, and restores database-driven categories wi
     $admin = makeAdmin();
     $student = makeStudent();
     $this->actingAs($admin)->postJson('/api/admin/categories', [
-        'name' => 'Applied Robotics', 'description' => 'Custom category', 'sort_order' => 8, 'is_active' => true,
+        'name' => 'Applied Robotics', 'description' => 'Custom category', 'sort_order' => 4, 'is_active' => true,
     ])->assertCreated()->assertJsonPath('category.name', 'Applied Robotics');
     $category = Category::where('name', 'Applied Robotics')->firstOrFail();
     Category::create(['name' => 'Learning practice', 'sort_order' => 5, 'is_active' => true]);
@@ -503,6 +545,49 @@ it('creates, orders, edits, archives, and restores database-driven categories wi
     $learning = $this->actingAs($student)->getJson('/api/learning')->assertOk();
     expect(collect($learning->json('categories'))->pluck('id'))->toContain($category->id);
     $this->actingAs($admin)->postJson("/api/admin/categories/{$category->id}/restore")->assertStatus(409);
+});
+
+it('accepts normalized category access toggles on create and update and rejects boolean strings', function () {
+    $admin = makeAdmin();
+    $this->actingAs($admin)->postJson('/api/admin/categories', [
+        'name' => 'Boolean payload rejected', 'is_active' => 'true',
+        'enable_first_lesson_access' => 'false', 'unlock_all_lessons' => 'true',
+    ])->assertUnprocessable()->assertJsonValidationErrors(['is_active', 'enable_first_lesson_access', 'unlock_all_lessons']);
+
+    $created = $this->postJson('/api/admin/categories', [
+        'name' => 'Mixed access settings', 'sort_order' => 1,
+        'is_active' => '1', 'enable_first_lesson_access' => '0', 'unlock_all_lessons' => '1',
+    ])->assertCreated()
+        ->assertJsonPath('category.is_active', true)
+        ->assertJsonPath('category.enable_first_lesson_access', false)
+        ->assertJsonPath('category.unlock_all_lessons', true);
+    $categoryId = $created->json('category.id');
+
+    $this->putJson("/api/admin/categories/{$categoryId}", [
+        'is_active' => '0', 'enable_first_lesson_access' => '1', 'unlock_all_lessons' => '0',
+    ])->assertOk()
+        ->assertJsonPath('category.is_active', false)
+        ->assertJsonPath('category.enable_first_lesson_access', true)
+        ->assertJsonPath('category.unlock_all_lessons', false);
+
+    $this->postJson('/api/admin/categories', [
+        'name' => 'All enabled', 'sort_order' => 2,
+        'is_active' => true, 'enable_first_lesson_access' => true, 'unlock_all_lessons' => true,
+    ])->assertCreated()
+        ->assertJsonPath('category.is_active', true)
+        ->assertJsonPath('category.enable_first_lesson_access', true)
+        ->assertJsonPath('category.unlock_all_lessons', true);
+
+    $disabled = $this->postJson('/api/admin/categories', [
+        'name' => 'All disabled', 'sort_order' => 3,
+        'is_active' => false, 'enable_first_lesson_access' => false, 'unlock_all_lessons' => false,
+    ])->assertCreated();
+    $this->putJson('/api/admin/categories/'.$disabled->json('category.id'), [
+        'is_active' => true, 'enable_first_lesson_access' => true, 'unlock_all_lessons' => true,
+    ])->assertOk()
+        ->assertJsonPath('category.is_active', true)
+        ->assertJsonPath('category.enable_first_lesson_access', true)
+        ->assertJsonPath('category.unlock_all_lessons', true);
 });
 
 it('soft deletes a category with no history and rejects lesson assignment to archived categories', function () {
