@@ -296,12 +296,20 @@ onMounted(() => {
     });
   });
 });
+
 </script>
 
 <template>
   <main v-if="loading" class="loading"><div class="spinner"></div><span>Getting your learning space ready…</span></main>
   <section v-else-if="!user" class="auth-page">
-    <div class="auth-art"><div class="art-mark"><GraduationCap :size="28" /></div><div><p class="eyebrow">A LITTLE PROGRESS, EVERY DAY</p><h1>Make room<br>to grow.</h1><p class="art-copy">A calmer way to learn, one lesson at a time.</p></div><div class="art-footer">{{ branding.brand_name }} <span>·</span> {{ branding.brand_description }}</div></div>
+    <div class="auth-art">
+      <div class="art-mark">
+        <!-- <GraduationCap :size="28" /> -->
+         <img src="https://online.zcmc-edu.com/storage/branding/zcmc-logo.svg" alt="Logo" class="w-7 h-7 object-contain" />
+      </div>
+      <div><p class="eyebrow">A LITTLE PROGRESS, EVERY DAY</p><h1>Make room<br>to grow.</h1><p class="art-copy">A calmer way to learn, one lesson at a time.</p></div>
+      <div class="art-footer">{{ branding.brand_name }} <span>·</span> {{ branding.brand_description }}</div>
+    </div>
     <div class="auth-form-wrap">
       <form v-if="resetToken" class="auth-form" @submit.prevent="submitReset"><div class="mobile-brand"><GraduationCap /><span><b>{{ branding.brand_name }}</b><small>{{ branding.brand_description }}</small></span></div><p class="eyebrow">ACCOUNT RECOVERY</p><h2>Choose a new password.</h2><p class="muted">Set a new password to get back to learning.</p><label>Email address<input v-model="resetEmail" name="email" type="email" autocomplete="email" required></label><label>New password<input name="password" type="password" autocomplete="new-password" required minlength="8" placeholder="At least 8 characters"></label><label>Confirm password<input name="password_confirmation" type="password" autocomplete="new-password" required minlength="8" placeholder="Enter it again"></label><p v-if="error" class="error">{{ error }}</p><button class="primary wide">Update password <ChevronRight :size="17" /></button></form>
       <form v-else-if="resetMode" class="auth-form" @submit.prevent="requestReset"><div class="mobile-brand"><GraduationCap /><span><b>{{ branding.brand_name }}</b><small>{{ branding.brand_description }}</small></span></div><p class="eyebrow">ACCOUNT RECOVERY</p><h2>Forgot your password?</h2><p class="muted">We’ll email you a link to choose a new one.</p><label>Email address<input name="email" type="email" autocomplete="email" required placeholder="you@example.com"></label><p v-if="error" class="error">{{ error }}</p><p v-if="notice" class="success">{{ notice }}</p><button class="primary wide">Send reset link <ChevronRight :size="17" /></button><p class="switch"><button type="button" @click="resetMode = false; error = ''; notice = ''">Back to sign in</button></p></form>
