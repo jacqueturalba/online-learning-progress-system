@@ -87,7 +87,7 @@ test('Continue resumes playback, advances to the next lesson, and offers an auto
     await page.getByLabel('Password', { exact: true }).fill('StrongPass123!');
     await page.getByLabel('Confirm password').fill('StrongPass123!');
     await page.getByRole('button', { name: 'Create account', exact: true }).click();
-    await expect(page.getByRole('heading', { name: /Good morning, Playwright/ })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Good day, Playwright/ })).toBeVisible();
 
     await page.evaluate(async lessonId => {
       const token = document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content || '';

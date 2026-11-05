@@ -26,6 +26,7 @@ class AdminLessonController extends Controller
         ]);
         $status = $filters['status'] ?? 'all';
         $query = Lesson::withTrashed()->with(['category:id,name'])->withCount('progress');
+        $query->addSelect(['lessons.*']);
         if ($status === 'archived') $query->onlyTrashed();
         elseif ($status === 'published') $query->whereNull('deleted_at')->where('is_published', true);
         elseif ($status === 'draft') $query->whereNull('deleted_at')->where('is_published', false);
@@ -33,7 +34,7 @@ class AdminLessonController extends Controller
         $query->when($filters['search'] ?? null, fn ($q, $term) => $q->where('title', 'like', '%'.$term.'%'));
 
         return response()->json([
-            'lessons' => $query->orderBy('category_id')->orderBy('sort_order')->orderBy('id')->paginate(50)->withQueryString(),
+            'lessons' => $query->orderBy('category_id')->orderBy('sort_order')->orderBy('id')->paginate(50)->withQueryString()->through(fn ($lesson) => array_merge($lesson->toArray(), ['thumbnail_url' => $lesson->thumbnail_path ? Storage::disk('public')->url($lesson->thumbnail_path) : null])),
             'categories' => Category::withTrashed()->orderBy('sort_order')->orderBy('id')->get(['id', 'name', 'deleted_at']),
         ]);
     }
@@ -43,6 +44,8 @@ class AdminLessonController extends Controller
         $data = $this->validatedLesson($request);
         $path = $request->file('video')?->store('lesson-videos', 'local');
         if ($request->hasFile('video') && !$path) throw new \RuntimeException('The uploaded video could not be stored.');
+        $thumbnail = $request->file('thumbnail')?->store('branding/lessons', 'public');
+        if ($thumbnail) $data['thumbnail_path'] = $thumbnail;
         if ($path) $data['video_path'] = $path;
         if (!array_key_exists('sort_order', $data)) {
             $data['sort_order'] = (Lesson::withTrashed()->where('category_id', $data['category_id'])->max('sort_order') ?? 0) + 1;
@@ -63,8 +66,12 @@ class AdminLessonController extends Controller
         $oldCategoryId = $lesson->category_id;
         $data = $this->validatedLesson($request, $lesson);
         $oldPath = $lesson->video_path;
+        $oldThumbnail = $lesson->thumbnail_path;
         $newPath = $request->file('video')?->store('lesson-videos', 'local');
         if ($request->hasFile('video') && !$newPath) throw new \RuntimeException('The uploaded video could not be stored.');
+        $newThumbnail = $request->file('thumbnail')?->store('branding/lessons', 'public');
+        if ($newThumbnail) $data['thumbnail_path'] = $newThumbnail;
+        elseif ($request->boolean('remove_thumbnail')) $data['thumbnail_path'] = null;
         if ($newPath) $data['video_path'] = $newPath;
         try {
             $lesson->update($data);
@@ -73,6 +80,7 @@ class AdminLessonController extends Controller
             throw $exception;
         }
         if ($newPath && $oldPath && $oldPath !== $newPath) Storage::disk('local')->delete($oldPath);
+        if (($newThumbnail || $request->boolean('remove_thumbnail')) && $oldThumbnail && $oldThumbnail !== $newThumbnail) Storage::disk('public')->delete($oldThumbnail);
         StudentCategoryProgress::refreshForCategory($oldCategoryId);
         if ($lesson->category_id !== $oldCategoryId) StudentCategoryProgress::refreshForCategory($lesson->category_id);
 
@@ -129,6 +137,8 @@ class AdminLessonController extends Controller
             'category_id' => [$partial ? 'sometimes' : 'required', 'integer', Rule::exists('categories', 'id')->whereNull('deleted_at')],
             'title' => [$partial ? 'sometimes' : 'required', 'string', 'max:180'],
             'video' => [$partial ? 'sometimes' : 'nullable', 'file', 'mimes:mp4,mov,webm,m4v,avi', 'extensions:mp4,mov,webm,m4v,avi', 'max:'.self::MAX_VIDEO_SIZE_KILOBYTES],
+            'thumbnail' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:5120'],
+            'remove_thumbnail' => ['sometimes', 'boolean'],
             'description' => ['sometimes', 'nullable', 'string'],
             'duration_seconds' => ['sometimes', 'nullable', 'integer', 'min:1'],
             'sort_order' => ['sometimes', 'integer', 'min:0'],
