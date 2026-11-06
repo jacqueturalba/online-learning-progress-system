@@ -13,7 +13,7 @@ class AuthController extends Controller
 {
     public function register(Request $request)
     {
-        $data = $request->validate(['name' => ['required', 'string', 'max:120'], 'email' => ['required', 'email', 'max:255', 'unique:users'], 'password' => ['required', 'confirmed', PasswordRule::defaults()]]);
+        $data = $request->validate(['name' => ['required', 'string', 'max:120'], 'email' => ['required', 'email', 'max:255', 'unique:users'], 'password' => ['required', 'confirmed', PasswordRule::defaults()], 'country'=>['required','string','max:100'], 'address'=>['required','string','max:500'], 'phone_country_code'=>['required','regex:/^\+[1-9][0-9]{0,3}$/'], 'phone_number'=>['required','regex:/^[0-9 ()-]{4,24}$/']]);
         $user = User::create([...$data, 'role' => 'student']);
         Auth::login($user);
         $request->session()->regenerate();
@@ -38,7 +38,7 @@ class AuthController extends Controller
         return response()->json(['message' => 'Signed out.']);
     }
 
-    public function me(Request $request) { return response()->json(['user' => $request->user()->only('id', 'name', 'email', 'role')]); }
+    public function me(Request $request) { return response()->json(['user' => $request->user()->only('id', 'name', 'email', 'role', 'country', 'address', 'phone_country_code', 'phone_number')]); }
 
     public function updatePassword(Request $request)
     {
@@ -53,6 +53,13 @@ class AuthController extends Controller
         $request->user()->forceFill(['password' => $data['password']])->save();
 
         return response()->json(['message' => 'Your password has been changed.']);
+    }
+
+    public function updateContact(Request $request)
+    {
+        $data = $request->validate(['country'=>['required','string','max:100'], 'address'=>['required','string','max:500'], 'phone_country_code'=>['required','regex:/^\+[1-9][0-9]{0,3}$/'], 'phone_number'=>['required','regex:/^[0-9 ()-]{4,24}$/']]);
+        $request->user()->update($data);
+        return response()->json(['message'=>'Contact information updated.']);
     }
 
     public function forgotPassword(Request $request)
