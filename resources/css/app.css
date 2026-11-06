@@ -47,6 +47,7 @@ button { cursor: pointer; }
   --link-ink: #005A78;
   --success-ink: #006B54;
   --achievement-ink: #385D1D;
+  --hero-dash: #fff;
 }
 
 body { background: var(--canvas); color: var(--text-primary); }
@@ -68,8 +69,8 @@ button, a, input { -webkit-tap-highlight-color: transparent; }
 .mobile-menu { color: var(--link-ink); }
 .hero { background: var(--blue-tint); border: 1px solid #D5EFF9; border-radius: 12px; }
 .hero-tag { color: var(--link-ink); background: #D7F2FC; }
-.hero-copy h2 { color: var(--text-primary); }
-.hero-copy p { color: var(--text-secondary); }
+.hero-copy h2 { color: var(--hero-dash); }
+.hero-copy p { color: var(--hero-dash); }
 .hero-button, .primary { background: var(--brand-blue); color: var(--action-ink); box-shadow: none; border-radius: 8px; font-weight: 700; transition: background-color .15s ease, transform .15s ease; }
 .hero-button:hover, .primary:hover { background: #047FA9; color: #fff; }
 .hero-button:active, .primary:active { transform: translateY(1px); }
@@ -132,6 +133,7 @@ button, a, input { -webkit-tap-highlight-color: transparent; }
 .admin-nav-item.active svg { color: var(--brand-blue); }
 .admin-sidebar .sidebar-bottom { padding-top: 18px; }
 .admin-content { max-width: 1600px; }
+.content img {max-width: 110%;}
 .admin-content .welcome { margin-bottom: 28px; }
 .admin-content .admin-notice { align-items: flex-start; gap: 15px; padding: 24px; }
 .admin-content .admin-notice > svg { flex: none; color: var(--brand-blue); }
@@ -610,3 +612,26 @@ small { font-size: max(12px, 1em); }
 .progress-history-category li time { color: var(--text-secondary); font-size:12px; text-align: right; }
 @media (max-width: 1150px) { .progress-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); } .progress-student-filter { grid-column: span 2; } }
 @media (max-width: 680px) { .progress-report-panel { padding: 13px; } .progress-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); } .progress-student-filter { grid-column: 1 / -1; } .progress-apply-button { width: 100%; } .progress-history-category li { grid-template-columns: minmax(0, 1fr) auto; } .progress-history-category li time { grid-column: 1 / -1; text-align: left; } }
+/* Student home: stack the Daily Verse below Continue Learning on mobile */
+@media (max-width: 680px) {
+    .hero {
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .hero-copy {
+        width: 100%;
+        max-width: 100%;
+        box-sizing: border-box;
+    }
+
+    .daily-verse {
+        position: relative;
+        inset: auto;
+        width: auto;
+        margin: 0 14px 14px;
+        box-sizing: border-box;
+        align-self: stretch;
+    }
+}
