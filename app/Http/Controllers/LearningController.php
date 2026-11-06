@@ -46,7 +46,14 @@ class LearningController extends Controller
 
             return ['id' => $category->id, 'name' => $category->name, 'description' => $category->description, 'thumbnail_url' => $category->thumbnail_path ? Storage::disk('public')->url($category->thumbnail_path) : null, 'background_color' => $category->background_color, 'enable_first_lesson_access' => $category->enable_first_lesson_access, 'unlock_all_lessons' => $category->unlock_all_lessons, 'completed_lessons' => $completed, 'total_lessons' => $lessons->count(), 'progress_percentage' => $lessons->count() ? round($completed / $lessons->count() * 100, 1) : 0, 'lessons' => $lessons];
         });
-        return response()->json(['categories' => $categories]);
+        $setting = DB::table('student_enrollment_settings')->where('student_id',$request->user()->id)->first() ?: DB::table('enrollment_settings')->where('id', 1)->first();
+        $eligible = !$setting || !$setting->enabled;
+        if (!$eligible && $setting->category_id && $setting->lesson_number > 0) {
+            $required = Category::find($setting->category_id)?->lessons()->where('is_published', true)->orderBy('sort_order')->orderBy('id')->skip($setting->lesson_number - 1)->first();
+            $eligible = $required && $request->user()->lessonProgress()->where('lesson_id', $required->id)->where('is_completed', true)->exists();
+        }
+        $form = $request->user()->enrollmentForms()->latest('revision')->first();
+        return response()->json(['categories' => $categories, 'enrollment' => ['eligible'=>(bool)$eligible, 'requirement_enabled'=>(bool)($setting->enabled ?? false), 'category_name'=>Category::find($setting->category_id ?? 0)?->name, 'lesson_number'=>(int)($setting->lesson_number ?? 0), 'status'=>$form?->status ?? 'not_started', 'revision_reason'=>$form?->revision_reason]]);
     }
 
     public function myZoom(Request $request)

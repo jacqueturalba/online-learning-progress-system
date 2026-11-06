@@ -27,7 +27,7 @@ class AdminStudentController extends Controller
             'page' => ['nullable', 'integer', 'min:1'],
         ]);
 
-        $query = User::query()->where('role', 'student')->with('paceGroup')
+        $query = User::query()->where('role', 'student')->with('paceGroup')->with(['enrollmentForms' => fn ($forms) => $forms->orderByDesc('revision')->limit(1)])
             ->with(['categoryProgress' => fn ($progress) => $progress->with('category')->orderByDesc('updated_at')->orderByDesc('id')]);
 
         if ($search = trim($filters['search'] ?? '')) {
@@ -76,6 +76,8 @@ class AdminStudentController extends Controller
                 'weekly_target' => $student->paceGroup?->weekly_target ?? 0,
                 'is_active' => $student->is_active,
                 'registered_at' => $student->created_at,
+                'enrollment_status' => $student->enrollmentForms->first()?->status ?? 'not_started',
+                'enrollment_submitted_at' => $student->enrollmentForms->first()?->submitted_at,
                 'current_category' => $category ? ['id' => $category->id, 'name' => $category->name, 'is_active' => $category->is_active, 'is_archived' => $category->trashed()] : null,
                 'progress' => ['completed_lessons' => $completed, 'total_lessons' => $total, 'percentage' => $total ? round($completed / $total * 100, 1) : 0],
             ];
@@ -143,7 +145,8 @@ class AdminStudentController extends Controller
                 'id' => $student->id,
                 'real_name' => $student->name,
                 'email' => $student->email,
-                'personal_information' => ['real_name' => $student->name, 'email' => $student->email],
+                'country' => $student->country, 'address' => $student->address, 'phone_country_code' => $student->phone_country_code, 'phone_number' => $student->phone_number,
+                'personal_information' => ['real_name' => $student->name, 'email' => $student->email, 'country'=>$student->country, 'address'=>$student->address, 'phone_country_code'=>$student->phone_country_code, 'phone_number'=>$student->phone_number],
                 'pseudocode' => $student->pseudocode,
                 'pace_group' => $student->pace_group,
                 'weekly_target' => $student->paceGroup?->weekly_target ?? 0,

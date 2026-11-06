@@ -11,7 +11,7 @@ use LogicException;
 class User extends Authenticatable
 {
     use HasFactory, Notifiable;
-    protected $fillable = ['name', 'email', 'password', 'role', 'pace_group', 'is_active'];
+    protected $fillable = ['name', 'email', 'password', 'role', 'pace_group', 'is_active', 'country', 'address', 'phone_country_code', 'phone_number'];
     protected $hidden = ['password', 'remember_token', 'pseudocode', 'pace_group', 'is_active'];
     protected function casts(): array { return ['email_verified_at' => 'datetime', 'password' => 'hashed', 'is_active' => 'boolean']; }
     public function lessonProgress() { return $this->hasMany(StudentLessonProgress::class, 'student_id'); }
@@ -22,6 +22,7 @@ class User extends Authenticatable
     public function zoomAttendanceRecords() { return $this->hasMany(ZoomAttendanceRecord::class, 'student_id'); }
     public function realizations() { return $this->hasMany(StudentRealization::class, 'student_id'); }
     public function paceGroup() { return $this->belongsTo(PaceGroup::class, 'pace_group', 'code'); }
+    public function enrollmentForms() { return $this->hasMany(StudentEnrollmentForm::class, 'student_id'); }
 
     protected static function booted(): void
     {

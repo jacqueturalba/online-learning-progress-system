@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 
-defineProps<{ user: { name: string; email: string } }>();
+const props = defineProps<{ user: { name: string; email: string; country?: string|null; address?: string|null; phone_country_code?: string|null; phone_number?: string|null } }>();
 const saving = ref(false), error = ref(''), notice = ref('');
+const contact = ref({country:props.user.country||'',address:props.user.address||'',phone_country_code:props.user.phone_country_code||'',phone_number:props.user.phone_number||''});
 const csrf = () => document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content || '';
+async function saveContact(){saving.value=true;error.value='';notice.value='';try{const r=await fetch('/api/profile/contact',{method:'PUT',credentials:'same-origin',headers:{Accept:'application/json','Content-Type':'application/json','X-CSRF-TOKEN':csrf()},body:JSON.stringify(contact.value)}),b=await r.json();if(!r.ok)throw new Error(Object.values(b.errors||{}).flat()[0] as string||b.message||'Contact information could not be saved.');notice.value=b.message}catch(e){error.value=(e as Error).message}finally{saving.value=false}}
 
 async function changePassword(event: Event) {
   if (saving.value) return;
@@ -40,6 +42,7 @@ async function changePassword(event: Event) {
     <section class="student-info-card profile-summary">
       <h2>Profile</h2>
       <dl><div><dt>Name</dt><dd>{{ user.name }}</dd></div><div><dt>Email</dt><dd>{{ user.email }}</dd></div></dl>
+      <form class="profile-password-form" @submit.prevent="saveContact"><label>Country<input v-model="contact.country" list="profile-countries" required><datalist id="profile-countries"><option>Philippines</option><option>Singapore</option><option>United States</option><option>United Kingdom</option><option>Canada</option><option>Australia</option><option>Malaysia</option><option>Japan</option></datalist></label><label>Complete address<textarea v-model="contact.address" required rows="2"></textarea></label><label>Phone number<div class="phone-input"><select v-model="contact.phone_country_code" required><option value="">Calling code</option><option value="+63">Philippines +63</option><option value="+65">Singapore +65</option><option value="+1">US/Canada +1</option><option value="+44">UK +44</option><option value="+61">Australia +61</option><option value="+60">Malaysia +60</option><option value="+91">India +91</option></select><input v-model="contact.phone_number" inputmode="tel" required></div></label><p v-if="error" class="student-error" role="alert">{{ error }}</p><p v-if="notice" class="student-success" role="status">{{ notice }}</p><button class="primary" :disabled="saving">{{ saving?'Saving…':'Save contact information' }}</button></form>
     </section>
     <section class="student-info-card profile-password-card" aria-labelledby="profile-password-title">
       <h2 id="profile-password-title">Change password</h2>

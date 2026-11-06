@@ -40,11 +40,12 @@ function fakeVideo(string $name = 'lesson.mp4'): UploadedFile
 }
 
 it('registers a student and ignores an attempted admin role', function () {
-    $response = $this->postJson('/register', ['name' => 'New Student', 'email' => 'new@example.test', 'password' => 'StrongPass123!', 'password_confirmation' => 'StrongPass123!', 'role' => 'admin', 'pseudocode' => 'STU-ATTACKER']);
+    $response = $this->postJson('/register', ['name' => 'New Student', 'email' => 'new@example.test', 'password' => 'StrongPass123!', 'password_confirmation' => 'StrongPass123!', 'country'=>'Philippines','address'=>'Manila','phone_country_code'=>'+63','phone_number'=>'9123456789','role' => 'admin', 'pseudocode' => 'STU-ATTACKER']);
 
     $response->assertCreated()->assertJsonPath('user.role', 'student');
     $this->assertAuthenticated();
     expect(User::where('email', 'new@example.test')->value('role'))->toBe('student');
+    expect(User::where('email', 'new@example.test')->first()->only('country','address','phone_country_code','phone_number'))->toBe(['country'=>'Philippines','address'=>'Manila','phone_country_code'=>'+63','phone_number'=>'9123456789']);
     expect(User::where('email', 'new@example.test')->value('pseudocode'))->not->toBe('STU-ATTACKER');
     $response->assertJsonMissingPath('user.pseudocode');
     $this->getJson('/api/me')->assertJsonMissingPath('user.pseudocode')->assertJsonMissingPath('user.pace_group');
