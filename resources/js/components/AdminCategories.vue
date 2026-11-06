@@ -10,7 +10,7 @@ type Category = {
 const categories = ref<Category[]>([]), loading = ref(false), saving = ref(false), error = ref(''), notice = ref('');
 const editingId = ref<number | null>(null);
 const form = ref({ name: '', description: '', sort_order: 1, is_active: true, enable_first_lesson_access: false, unlock_all_lessons: false });
-const thumbnail = ref<File | null>(null), thumbnailPreview = ref<string | null>(null), removeThumbnail = ref(false), categoryColor = ref('#E8F2EA');
+const thumbnail = ref<File | null>(null), thumbnailPreview = ref<string | null>(null), removeThumbnail = ref(false), categoryColor = ref('#e8f2ea');
 const isEditing = computed(() => editingId.value !== null);
 
 const headers = () => ({
@@ -41,7 +41,7 @@ function startCreate() {
     sort_order: categories.value.reduce((largest, category) => Math.max(largest, category.sort_order), 0) + 1,
     is_active: true, enable_first_lesson_access: false, unlock_all_lessons: false,
   };
-  thumbnail.value = null; thumbnailPreview.value = null; removeThumbnail.value = false; categoryColor.value = '#E8F2EA';
+  thumbnail.value = null; thumbnailPreview.value = null; removeThumbnail.value = false; categoryColor.value = '#e8f2ea';
   error.value = '';
   notice.value = '';
 }
@@ -50,7 +50,7 @@ function startEdit(category: Category) {
   if (category.deleted_at) return;
   editingId.value = category.id;
   form.value = { name: category.name, description: category.description ?? '', sort_order: category.sort_order, is_active: category.is_active, enable_first_lesson_access: category.enable_first_lesson_access, unlock_all_lessons: category.unlock_all_lessons };
-  thumbnail.value = null; thumbnailPreview.value = category.thumbnail_url; removeThumbnail.value = false; categoryColor.value = category.background_color || '#E8F2EA';
+  thumbnail.value = null; thumbnailPreview.value = category.thumbnail_url; removeThumbnail.value = false; categoryColor.value = category.background_color || '#e8f2ea';
   error.value = '';
   notice.value = '';
 }
