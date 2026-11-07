@@ -10,6 +10,7 @@ use Illuminate\Support\Collection;
 
 class ReportXlsxExporter
 {
+    private string $sheet1Relationships = '';
     /**
      * Create a small, dependency-free XLSX workbook using the Open XML ZIP format.
      * Columns are [key, label, type?], where type is text, number, date, or duration.
@@ -52,6 +53,7 @@ class ReportXlsxExporter
             'xl/worksheets/sheet1.xml' => $this->worksheet($title, $columns, $dataRows),
             'xl/worksheets/sheet2.xml' => $this->summaryWorksheet($summaryRows),
         ];
+        if ($this->sheet1Relationships !== '') $files['xl/worksheets/_rels/sheet1.xml.rels'] = $this->sheet1Relationships;
 
         $content = $this->zip($files);
         return response($content, 200, [
@@ -115,6 +117,9 @@ class ReportXlsxExporter
 
     private function worksheet(string $title, array $columns, array $rows): string
     {
+        $this->sheet1Relationships = '';
+        $hyperlinks = [];
+        $relationships = [];
         $xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             .'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="5" topLeftCell="A6" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>';
         $xml .= '<sheetData>'.$this->rowXml(1, [['value' => $title, 'type' => 'text']], 1)
@@ -122,9 +127,21 @@ class ReportXlsxExporter
             .$this->rowXml(3, [['value' => count($rows).' report rows', 'type' => 'text']], 2)
             .$this->rowXml(5, array_map(fn ($column) => ['value' => $column['label'], 'type' => 'text'], $columns), 3);
         foreach ($rows as $index => $cells) {
+            foreach ($cells as $cellIndex => $cell) {
+                if (($cell['type'] ?? ($columns[$cellIndex]['type'] ?? 'text')) !== 'hyperlink' || empty($cell['value'])) continue;
+                $reference = $this->columnName($cellIndex + 1).($index + 6);
+                $relationshipId = 'rId'.(count($relationships) + 1);
+                $url = (string) $cell['value'];
+                if (!preg_match('/^https?:\/\//i', $url)) continue;
+                $relationships[] = '<Relationship Id="'.$relationshipId.'" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="'.$this->escape($url).'" TargetMode="External"/>';
+                $hyperlinks[] = '<hyperlink ref="'.$reference.'" r:id="'.$relationshipId.'"/>';
+            }
             $xml .= $this->rowXml($index + 6, $cells, 0, $columns);
         }
-        return $xml.'</sheetData><autoFilter ref="A5:'.$this->columnName(max(1, count($columns))).(count($rows) + 5).'"/></worksheet>';
+        if ($relationships) {
+            $this->sheet1Relationships = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'.implode('', $relationships).'</Relationships>';
+        }
+        return $xml.'</sheetData>'.($hyperlinks ? '<hyperlinks xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'.implode('', $hyperlinks).'</hyperlinks>' : '').'<autoFilter ref="A5:'.$this->columnName(max(1, count($columns))).(count($rows) + 5).'"/></worksheet>';
     }
 
     private function summaryWorksheet(array $rows): string
