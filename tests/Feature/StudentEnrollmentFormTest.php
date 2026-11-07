@@ -65,6 +65,8 @@ it('preserves and independently replaces private documents across enrollment rev
     $firstId=$first->id_document_path; $firstPicture=$first->picture_path;
     expect(Storage::disk('local')->exists($firstId))->toBeTrue()->and(Storage::disk('local')->exists($firstPicture))->toBeTrue();
     $this->actingAs($student)->get(route('enrollment-form.document',['form'=>$first,'kind'=>'picture']))->assertOk();
+    $this->actingAs($admin)->get(route('enrollment-form.document',['form'=>$first,'kind'=>'id']))->assertOk()->assertHeader('cache-control','no-store, private');
+    $this->actingAs($admin)->get(route('enrollment-form.document',['form'=>$first,'kind'=>'picture']))->assertOk()->assertHeader('cache-control','no-store, private');
     $this->actingAs($student)->getJson('/api/enrollment-form')->assertJsonPath('documents.picture_url',route('enrollment-form.document',['form'=>$first,'kind'=>'picture']))->assertJsonPath('documents.id_url',route('enrollment-form.document',['form'=>$first,'kind'=>'id']));
     $other=User::create(['name'=>'Other Student','email'=>'other-documents@example.test','password'=>'StrongPass123!','role'=>'student']);
     $this->actingAs($other)->get(route('enrollment-form.document',['form'=>$first,'kind'=>'picture']))->assertNotFound();
