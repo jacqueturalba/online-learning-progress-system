@@ -3,6 +3,7 @@ import { ref } from 'vue';
 import StudentEnrollment from './StudentEnrollment.vue';
 
 const props = defineProps<{ user: { name: string; email: string; country?: string|null; address?: string|null; phone_country_code?: string|null; phone_number?: string|null }; enrollmentEligible: boolean }>();
+const emit = defineEmits<{ enrollmentSubmitted: [status: string] }>();
 const saving = ref(false), error = ref(''), notice = ref('');
 const contact = ref({country:props.user.country||'',address:props.user.address||'',phone_country_code:props.user.phone_country_code||'',phone_number:props.user.phone_number||''});
 const csrf = () => document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content || '';
@@ -63,7 +64,7 @@ async function changePassword(event: Event) {
     </details>
     <section v-if="enrollmentEligible" class="profile-enrollment-section" aria-labelledby="profile-enrollment-title">
       <header><p class="eyebrow">STUDENT ADMISSION</p><h2 id="profile-enrollment-title">Official Enrollment Form</h2><p>Complete or review your enrollment information and supporting documents.</p></header>
-      <StudentEnrollment />
+      <StudentEnrollment @submitted="emit('enrollmentSubmitted', $event)" />
     </section>
   </div>
 </template>

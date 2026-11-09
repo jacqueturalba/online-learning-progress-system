@@ -675,3 +675,11 @@ small { font-size: max(12px, 1em); }
 .enrollment-approved .enrollment-step{display:contents}
 .enrollment-scroll-top{display:none}
 @media(max-width:640px){.enrollment-approved .enrollment-step{display:contents!important}.enrollment-scroll-top{position:fixed;right:16px;bottom:18px;z-index:8;display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:0 14px;border:0;border-radius:999px;background:var(--brand-blue);color:var(--action-ink);font-size:14px;font-weight:650;box-shadow:0 4px 16px #17251d35}}
+.enrollment-revision{align-items:flex-start;border:2px solid #a33b35;background:#fff1ef;color:#57201d;box-shadow:0 5px 18px #8e2d281f}
+.enrollment-revision>svg{flex:none;margin-top:2px;color:#a33b35}
+.enrollment-revision>div>b{font-size:1.05rem;color:#762b25}
+.enrollment-revision>div>span{color:#57201d;line-height:1.5}
+.enrollment-revision blockquote{display:grid;gap:5px;margin:9px 0 0;padding:11px 13px;border-left:4px solid #a33b35;border-radius:4px;background:#fff;color:#45201d;line-height:1.5}
+.enrollment-revision blockquote strong{font-size:.82rem;color:#762b25}
+.enrollment-revision blockquote span{white-space:pre-line;font-size:.92rem}
+.enrollment-revision>button{flex:none;background:#8c302b;color:#fff}

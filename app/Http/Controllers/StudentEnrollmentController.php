@@ -47,21 +47,25 @@ class StudentEnrollmentController extends Controller
             'picture' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:5120'],
         ]);
         $data = $input['data'];
+        $student = $request->user();
+        $current = $student->enrollmentForms()->latest('revision')->first();
+        $previousRevision = $current && $current->status === 'needs_revision' ? $current : null;
+        if ($input['action'] === 'submit' && $current && in_array($current->status, ['submitted','approved'], true)) abort(409, 'This form has already been submitted.');
         if (!empty($data['birthday'])) {
             try { $data['age'] = \Illuminate\Support\Carbon::parse($data['birthday'])->age; }
             catch (\Throwable) { $data['age'] = null; }
         }
         if ($input['action'] === 'submit') {
-            $rules = ['first_name'=>'required|string|max:100','last_name'=>'required|string|max:100','gender'=>'required|in:Male,Female','birthday'=>'required|date|before:today','civil_status'=>'required|in:Single,Married,Widowed,Separated,Divorced','children'=>'required|in:Yes,No','country_current'=>'required|string|max:100','nationality'=>'required|string|max:100','first_language'=>'required|string|max:100','english_level'=>'required|in:Beginner,Elementary,Intermediate,Upper-Intermediate,Advanced,Proficient','phone'=>'required|string|max:60','email'=>'required|email|max:255','address'=>'required|string|max:500','church_position'=>'required|in:Pastor,Non-Pastor','church_name'=>'required|string|max:255','believer_years'=>'required|string|max:80','church_address'=>'required|string|max:500'];
+            $rules = ['first_name'=>'required|string|max:100','last_name'=>'required|string|max:100','gender'=>'required|in:Male,Female','birthday'=>'required|date|before:today','civil_status'=>'required|in:Single,Married,Widowed,Separated,Divorced','children'=>'required|in:Yes,No','country_current'=>'required|string|max:100','nationality'=>'required|string|max:100','first_language'=>'required|string|max:100','english_level'=>'required|in:Beginner,Elementary,Intermediate,Upper-Intermediate,Advanced,Proficient','phone'=>'required|string|max:60','email'=>'required|email|max:255','address'=>'required|string|max:500','employment'=>'required|string|max:255','church_position'=>'required|in:Pastor,Non-Pastor','church_name'=>'required|string|max:255','believer_years'=>'required|string|max:80','church_address'=>'required|string|max:500'];
             if (($data['church_position'] ?? '') === 'Pastor') foreach (['theology_studied','school_name','major','study_duration','level','religion','denomination','church_category','pastor_position','ministry_period','church_members'] as $field) $rules[$field] = 'required|string|max:255';
             $request->validate(['data' => ['required','array']]);
             validator($data, $rules)->validate();
             if (empty($data['privacy_acknowledged'])) throw ValidationException::withMessages(['data.privacy_acknowledged' => 'Please acknowledge the data privacy statement before submitting.']);
+            $missingDocuments = [];
+            if (!$request->hasFile('id_document') && !$current?->id_document_path) $missingDocuments['id_document'] = ['Upload an identification card or ID document before submitting.'];
+            if (!$request->hasFile('picture') && !$current?->picture_path) $missingDocuments['picture'] = ['Upload a student picture before submitting.'];
+            if ($missingDocuments) throw ValidationException::withMessages($missingDocuments);
         }
-        $student = $request->user();
-        $current = $student->enrollmentForms()->latest('revision')->first();
-        if ($input['action'] === 'submit' && $current && in_array($current->status, ['submitted','approved'], true)) abort(409, 'This form has already been submitted.');
-        $previousRevision = $current && $current->status === 'needs_revision' ? $current : null;
         if ($previousRevision) $current = null;
         $form = $current ?: new StudentEnrollmentForm([
             'student_id'=>$student->id,
