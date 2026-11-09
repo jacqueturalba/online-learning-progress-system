@@ -60,7 +60,8 @@ for (const viewport of [{ name: 'desktop', width: 1440, height: 900 }, { name: '
       await page.getByLabel('Nationality').fill('Filipino');
       await page.getByLabel('First Language').fill('English');
       await page.getByLabel('How well can you speak and understand English?').selectOption('Proficient');
-      await page.getByLabel('Phone Number').fill('+63 9123456789');
+      if (viewport.name === 'desktop') await page.getByLabel('Employment', { exact: true }).fill('Employed');
+      await page.getByLabel('Phone Number', { exact: true }).fill('+63 9123456789');
       await page.getByLabel('Email').fill('form-student@example.test');
       await page.getByLabel('Complete Name of Church').fill('Community Church');
       await page.getByLabel('Number of Years Being a Believer').fill('5');

@@ -40,10 +40,12 @@ it('saves a draft once and blocks students from reviewing enrollment forms', fun
 });
 
 it('preserves submission history when an admin returns a form and the student resubmits', function () {
+    Storage::fake('local');
     $student=User::create(['name'=>'Submit Learner','email'=>'submit@example.test','password'=>'StrongPass123!','role'=>'student']);
     $admin=User::create(['name'=>'Reviewer','email'=>'reviewer@example.test','password'=>'StrongPass123!','role'=>'admin']);
-    $data=['first_name'=>'Submit','last_name'=>'Learner','gender'=>'Female','birthday'=>'2000-02-01','civil_status'=>'Single','children'=>'No','country_current'=>'Singapore','nationality'=>'Filipino','first_language'=>'Tagalog','english_level'=>'Intermediate','phone'=>'+63 9123456789','email'=>$student->email,'address'=>'Manila','church_position'=>'Non-Pastor','church_name'=>'Community Church','believer_years'=>'5','church_address'=>'Makati','privacy_acknowledged'=>true];
-    $this->actingAs($student)->postJson('/api/enrollment-form',['action'=>'submit','data'=>$data])->assertOk()->assertJsonPath('form.status','submitted')->assertJsonPath('form.privacy_acknowledged',true);
+    $data=['first_name'=>'Submit','last_name'=>'Learner','gender'=>'Female','birthday'=>'2000-02-01','civil_status'=>'Single','children'=>'No','country_current'=>'Singapore','nationality'=>'Filipino','first_language'=>'Tagalog','english_level'=>'Intermediate','phone'=>'+63 9123456789','email'=>$student->email,'address'=>'Manila','employment'=>'Employed','church_position'=>'Non-Pastor','church_name'=>'Community Church','believer_years'=>'5','church_address'=>'Makati','privacy_acknowledged'=>true];
+    $png=fn(string $name)=>UploadedFile::fake()->createWithContent($name,base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j8q0AAAAASUVORK5CYII='));
+    $this->actingAs($student)->post('/api/enrollment-form',['action'=>'submit','data'=>json_encode($data),'id_document'=>$png('id.png'),'picture'=>$png('picture.png')],['Accept'=>'application/json'])->assertOk()->assertJsonPath('form.status','submitted')->assertJsonPath('form.privacy_acknowledged',true);
     $first=$student->enrollmentForms()->firstOrFail();
     $this->actingAs($admin)->postJson('/api/admin/students/'.$student->id.'/enrollment/review',['form_id'=>$first->id,'decision'=>'revision','reason'=>'Please confirm your address.'])->assertOk()->assertJsonPath('form.status','needs_revision');
     $this->actingAs($student)->postJson('/api/enrollment-form',['action'=>'submit','data'=>$data])->assertOk()->assertJsonPath('form.revision',2);
@@ -51,11 +53,27 @@ it('preserves submission history when an admin returns a form and the student re
     expect($first->fresh()->status)->toBe('needs_revision');
 });
 
+it('requires an ID document and student picture before enrollment submission', function () {
+    $student=User::create(['name'=>'Missing Documents','email'=>'missing-documents@example.test','password'=>'StrongPass123!','role'=>'student']);
+    $data=['first_name'=>'Missing','last_name'=>'Documents','gender'=>'Female','birthday'=>'2000-02-01','civil_status'=>'Single','children'=>'No','country_current'=>'Singapore','nationality'=>'Filipino','first_language'=>'Tagalog','english_level'=>'Intermediate','phone'=>'+63 9123456789','email'=>$student->email,'address'=>'Manila','employment'=>'Employed','church_position'=>'Non-Pastor','church_name'=>'Community Church','believer_years'=>'5','church_address'=>'Makati','privacy_acknowledged'=>true];
+    $this->actingAs($student)->postJson('/api/enrollment-form',['action'=>'submit','data'=>$data])->assertUnprocessable()->assertJsonValidationErrors(['id_document','picture']);
+    expect($student->enrollmentForms()->count())->toBe(0);
+});
+
+it('requires an employment answer before enrollment submission', function () {
+    Storage::fake('local');
+    $student=User::create(['name'=>'Missing Employment','email'=>'missing-employment@example.test','password'=>'StrongPass123!','role'=>'student']);
+    $data=['first_name'=>'Missing','last_name'=>'Employment','gender'=>'Female','birthday'=>'2000-02-01','civil_status'=>'Single','children'=>'No','country_current'=>'Singapore','nationality'=>'Filipino','first_language'=>'Tagalog','english_level'=>'Intermediate','phone'=>'+63 9123456789','email'=>$student->email,'address'=>'Manila','church_position'=>'Non-Pastor','church_name'=>'Community Church','believer_years'=>'5','church_address'=>'Makati','privacy_acknowledged'=>true];
+    $png=fn(string $name)=>UploadedFile::fake()->createWithContent($name,base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j8q0AAAAASUVORK5CYII='));
+    $this->actingAs($student)->post('/api/enrollment-form',['action'=>'submit','data'=>json_encode($data),'id_document'=>$png('id.png'),'picture'=>$png('picture.png')],['Accept'=>'application/json'])->assertUnprocessable()->assertJsonValidationErrors(['employment']);
+    expect($student->enrollmentForms()->count())->toBe(0);
+});
+
 it('preserves and independently replaces private documents across enrollment revisions', function () {
     Storage::fake('local');
     $student=User::create(['name'=>'Document Learner','email'=>'documents@example.test','password'=>'StrongPass123!','role'=>'student']);
     $admin=User::create(['name'=>'Document Reviewer','email'=>'document-reviewer@example.test','password'=>'StrongPass123!','role'=>'admin']);
-    $data=['first_name'=>'Document','last_name'=>'Learner','gender'=>'Female','birthday'=>'2000-02-01','civil_status'=>'Single','children'=>'No','country_current'=>'Singapore','nationality'=>'Filipino','first_language'=>'Tagalog','english_level'=>'Intermediate','phone'=>'+63 9123456789','email'=>$student->email,'address'=>'Manila','church_position'=>'Non-Pastor','church_name'=>'Community Church','believer_years'=>'5','church_address'=>'Makati','privacy_acknowledged'=>true];
+    $data=['first_name'=>'Document','last_name'=>'Learner','gender'=>'Female','birthday'=>'2000-02-01','civil_status'=>'Single','children'=>'No','country_current'=>'Singapore','nationality'=>'Filipino','first_language'=>'Tagalog','english_level'=>'Intermediate','phone'=>'+63 9123456789','email'=>$student->email,'address'=>'Manila','employment'=>'Employed','church_position'=>'Non-Pastor','church_name'=>'Community Church','believer_years'=>'5','church_address'=>'Makati','privacy_acknowledged'=>true];
     $png=fn(string $name)=>UploadedFile::fake()->createWithContent($name,base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j8q0AAAAASUVORK5CYII='));
     $save=function(string $action='submit',array $files=[]) use($student,$data){return $this->actingAs($student)->post('/api/enrollment-form',['action'=>$action,'data'=>json_encode($data),...$files]);};
     $returnForRevision=function(StudentEnrollmentForm $form) use($student,$admin){return $this->actingAs($admin)->postJson('/api/admin/students/'.$student->id.'/enrollment/review',['form_id'=>$form->id,'decision'=>'revision','reason'=>'Please review your attached information.']);};
