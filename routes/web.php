@@ -5,6 +5,8 @@ use App\Http\Controllers\LearningController;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/', fn () => view('app'));
+Route::get('/login', fn () => view('app'))->name('login');
+Route::get('/register', fn () => view('app'))->name('register');
 Route::get('/reset-password/{token}', fn () => view('app'))->middleware('guest')->name('password.reset');
 Route::post('/register', [AuthController::class, 'register'])->middleware(['guest', 'throttle:5,1']);
 Route::post('/login', [AuthController::class, 'login'])->middleware(['guest', 'throttle:5,1']);
