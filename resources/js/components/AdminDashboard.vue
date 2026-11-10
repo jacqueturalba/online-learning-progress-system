@@ -7,11 +7,12 @@ type DashboardData = {
   total_lessons: number;
   completed_lessons: number;
   transfer_eligible_students: number;
-  students_by_category: { id: number; name: string; is_active: boolean; is_archived: boolean; students_count: number }[];
+  students_by_category: { data: { id: number; name: string; is_active: boolean; is_archived: boolean; students_count: number }[]; current_page: number; last_page: number; total: number };
   recent_activity: { student_name: string; lesson_title: string; category_name: string | null; last_watched_at: string; is_completed: boolean }[];
 };
 
 defineProps<{ dashboard: DashboardData | null; loading: boolean; error: string }>();
+const emit = defineEmits<{ categoryPageChange: [page: number] }>();
 
 const links = [
   { label: 'Students', href: '/admin/students', icon: UsersRound },
@@ -63,13 +64,14 @@ function formatActivityDate(date: string) {
     <div class="dashboard-detail-grid">
       <section class="dashboard-panel" aria-labelledby="category-students-title">
         <div class="dashboard-panel-heading"><div><p class="eyebrow">LEARNING DISTRIBUTION</p><h2 id="category-students-title">Students by category</h2></div></div>
-        <div v-if="dashboard.students_by_category.length" class="dashboard-category-list">
-          <div v-for="category in dashboard.students_by_category" :key="category.id" class="dashboard-category-row">
+        <div v-if="dashboard.students_by_category.data.length" class="dashboard-category-list">
+          <div v-for="category in dashboard.students_by_category.data" :key="category.id" class="dashboard-category-row">
             <div class="dashboard-category-label"><strong>{{ category.name }}</strong><span v-if="category.is_archived" class="dashboard-archived">Archived</span><span v-else-if="!category.is_active">Unavailable</span><span>{{ category.students_count }} {{ category.students_count === 1 ? 'student' : 'students' }}</span></div>
             <div class="dashboard-category-track"><span :style="{ width: `${dashboard.total_students ? Math.min(100, category.students_count / dashboard.total_students * 100) : 0}%` }"></span></div>
           </div>
         </div>
         <p v-else class="dashboard-empty">No learning categories have been created.</p>
+        <div v-if="dashboard.students_by_category.last_page > 1" class="lesson-pagination"><button class="secondary-button" :disabled="dashboard.students_by_category.current_page <= 1 || loading" @click="emit('categoryPageChange', dashboard.students_by_category.current_page - 1)">Previous</button><span>Page {{ dashboard.students_by_category.current_page }} of {{ dashboard.students_by_category.last_page }} · {{ dashboard.students_by_category.total }} categories</span><button class="secondary-button" :disabled="dashboard.students_by_category.current_page >= dashboard.students_by_category.last_page || loading" @click="emit('categoryPageChange', dashboard.students_by_category.current_page + 1)">Next</button></div>
         <p class="dashboard-footnote">Students with recorded learning activity in each category.</p>
       </section>
 

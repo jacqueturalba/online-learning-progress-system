@@ -22,11 +22,14 @@ use Illuminate\Support\Str;
 
 class AdminZoomBatchController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        return response()->json(['batches' => ZoomBatch::query()->withCount(['memberships as enrolled_count' => fn ($q) => $q->where('status', 'active')])
+        $batches = ZoomBatch::query()->withCount(['memberships as enrolled_count' => fn ($q) => $q->where('status', 'active')])
             ->with(['zoomSessions' => fn ($q) => $q->whereNotNull('zoom_meeting_id')->orderByDesc('id')])
-            ->orderByDesc('created_at')->get()->map(fn (ZoomBatch $batch) => $this->batchSummary($batch))]);
+            ->orderByDesc('created_at')->paginate(25)->withQueryString();
+        $batches->getCollection()->transform(fn (ZoomBatch $batch) => $this->batchSummary($batch));
+        return response()->json(['batches' => $batches,
+            'batch_choices' => ZoomBatch::query()->orderBy('name')->get(['id', 'name', 'status'])]);
     }
 
     public function store(Request $request)
@@ -41,9 +44,10 @@ class AdminZoomBatchController extends Controller
         return response()->json(['batch' => $this->details($batch->fresh())]);
     }
 
-    public function show(ZoomBatch $batch)
+    public function show(Request $request, ZoomBatch $batch)
     {
-        return response()->json(['batch' => $this->details($batch)]);
+        $filters = $request->validate(['page' => ['nullable', 'integer', 'min:1']]);
+        return response()->json(['batch' => $this->details($batch, (int) ($filters['page'] ?? 1))]);
     }
 
     public function startMeeting(Request $request, ZoomBatch $batch, ZoomApiService $zoom)
@@ -488,11 +492,12 @@ class AdminZoomBatchController extends Controller
             'enrolled_count' => $batch->enrolled_count, 'session' => $session ? $this->sessionSummary($session) : null];
     }
 
-    private function details(ZoomBatch $batch): array
+    private function details(ZoomBatch $batch, int $page = 1): array
     {
-        $batch->load(['memberships' => fn ($q) => $q->where('status', 'active')->with('student:id,name,email,pseudocode'), 'zoomSessions' => fn ($q) => $q->whereNotNull('zoom_meeting_id')->orderByDesc('id')]);
+        $members = $batch->memberships()->where('status', 'active')->with('student:id,name,email,pseudocode')->orderBy('joined_at')->paginate(25, ['*'], 'page', $page)->withQueryString();
+        $batch->load(['zoomSessions' => fn ($q) => $q->whereNotNull('zoom_meeting_id')->orderByDesc('id')]);
         $session = $batch->zoomSessions->first();
-        $members = $batch->memberships->map(function ($membership) use ($session): array {
+        $members->getCollection()->transform(function ($membership) use ($session): array {
             $assignment = $session ? StudentZoomAssignment::query()->where('student_id', $membership->student_id)->where('zoom_session_id', $session->id)->first() : null;
             return ['membership_id' => $membership->id, 'id' => $membership->student->id, 'name' => $membership->student->name,
                 'email' => $membership->student->email, 'pseudocode' => $membership->student->pseudocode,
@@ -501,7 +506,7 @@ class AdminZoomBatchController extends Controller
         });
         return ['id' => $batch->id, 'name' => $batch->name, 'description' => $batch->description, 'status' => $batch->status,
             'capacity' => $batch->capacity, 'starts_at' => $batch->starts_at, 'ends_at' => $batch->ends_at,
-            'enrolled_count' => $members->count(), 'students' => $members, 'session' => $session ? $this->sessionSummary($session) : null];
+            'enrolled_count' => $members->total(), 'students' => $members, 'session' => $session ? $this->sessionSummary($session) : null];
     }
 
     private function sessionSummary(ZoomSession $session): array

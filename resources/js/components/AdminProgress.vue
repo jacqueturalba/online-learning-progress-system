@@ -4,7 +4,7 @@ import { onMounted, ref } from 'vue';
 type Category = { id: number; name: string; deleted_at: string | null };
 type LessonOption = { id: number; title: string; deleted_at: string | null };
 type ProgressStudent = { id: number; name: string; pseudocode: string; batch_id: number | null; batch_name: string; pace_group: string | null; weekly_target: number; lessons_started: number; lessons_completed: number; completion_percentage: number; current_lesson: string | null; current_category: string | null; transfer_eligible: boolean };
-type HistoryLesson = { id: number; title: string; is_published: boolean; is_completed: boolean; progress_percentage: number; last_watched_at: string | null };
+type HistoryLesson = { id: number; title: string; is_published: boolean; is_completed: boolean; progress_percentage: number; last_watched_at: string | null; started_at: string | null; completed_at: string | null };
 type HistoryCategory = { id: number; name: string; completed_at: string | null; completed_lessons: number; total_lessons: number; progress_percentage: number; lessons: HistoryLesson[] };
 const csrf = () => document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content || '';
 const rows = ref<ProgressStudent[]>([]), categories = ref<Category[]>([]), lessons = ref<LessonOption[]>([]), paceGroups = ref<{ value: string; label: string; weekly_target: number }[]>([]);

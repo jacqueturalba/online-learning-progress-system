@@ -11,6 +11,7 @@ use App\Services\ReportXlsxExporter;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
+use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Validation\ValidationException;
 
 class AdminRealizationController extends Controller
@@ -52,12 +53,11 @@ class AdminRealizationController extends Controller
         HistoricalBatchScope::join($query->getQuery(), 'student_realizations.student_id', 'student_realizations.submitted_at');
         HistoricalBatchScope::filter($query->getQuery(), $filters['batch_id'] ?? null);
 
-        $realizationQuery = $query
-            ->orderByDesc('student_realizations.submitted_at')->orderByDesc('student_realizations.id')
+        $realizationQuery = (clone $query)->orderByDesc('student_realizations.submitted_at')->orderByDesc('student_realizations.id')
             ->select([
                 'student_realizations.id', 'student_realizations.student_id', 'student_realizations.lesson_id',
                 'student_realizations.realization', 'student_realizations.submitted_at',
-                'users.name as student_name', 'users.pseudocode',
+                'users.name as student_name', 'users.email as student_email', 'users.pseudocode',
                 'lessons.title as lesson_title', 'lessons.category_id',
                 'categories.name as category_name',
                 'report_batch_membership.zoom_batch_id as batch_id', 'report_batch.name as batch_name',
@@ -71,7 +71,43 @@ class AdminRealizationController extends Controller
                 ['key' => 'realization', 'label' => 'Realization'], ['key' => 'submitted_at', 'label' => 'Submitted', 'type' => 'date'],
             ], $realizationQuery->get(), ['Student' => $filters['student'] ?? 'All', 'Batch ID' => $filters['batch_id'] ?? 'All', 'Category ID' => $filters['category_id'] ?? 'All', 'Lesson ID' => $filters['lesson_id'] ?? 'All', 'From' => $filters['date_from'] ?? 'All', 'To' => $filters['date_to'] ?? 'All']);
         }
-        $realizations = $realizationQuery->paginate(25)->withQueryString();
+        $studentIds = (clone $query)->select('student_realizations.student_id')->distinct()->orderBy('student_realizations.student_id');
+        $studentPage = $studentIds->paginate(25)->withQueryString();
+        $allForPage = collect();
+        $batchForPage = collect();
+        if ($studentPage->count()) {
+            $pageIds = $studentPage->pluck('student_id');
+            $batchForPage = (clone $query)->whereIn('student_realizations.student_id', $pageIds)
+                ->orderByDesc('student_realizations.submitted_at')->select([
+                    'student_realizations.student_id', 'report_batch_membership.zoom_batch_id as batch_id', 'report_batch.name as batch_name',
+                ])->get()->unique('student_id')->keyBy('student_id');
+            $allForPage = StudentRealization::query()
+                ->join('users', 'users.id', '=', 'student_realizations.student_id')
+                ->join('lessons', 'lessons.id', '=', 'student_realizations.lesson_id')
+                ->join('categories', 'categories.id', '=', 'lessons.category_id')
+                ->whereIn('student_realizations.student_id', $pageIds)
+                ->where('users.role', 'student')
+                ->orderByDesc('student_realizations.submitted_at')->orderByDesc('student_realizations.id')
+                ->select(['student_realizations.id', 'student_realizations.student_id', 'student_realizations.lesson_id',
+                    'student_realizations.realization', 'student_realizations.submitted_at', 'users.name as student_name',
+                    'users.email as student_email', 'users.pseudocode', 'lessons.title as lesson_title', 'lessons.category_id',
+                    'categories.name as category_name'])->get()->groupBy('student_id');
+        }
+        $studentPage->setCollection($studentPage->getCollection()->map(function ($student) use ($allForPage, $batchForPage): array {
+            $submissions = $allForPage->get($student->student_id, collect());
+            $first = $submissions->first();
+            $batch = $batchForPage->get($student->student_id);
+            return ['id' => $student->student_id, 'student_id' => $student->student_id,
+                'student_name' => $first?->student_name, 'student_email' => $first?->student_email,
+                'pseudocode' => $first?->pseudocode, 'realization_count' => $submissions->count(),
+                'batch_name' => $batch?->batch_name ?? 'No batch assigned', 'batch_id' => $batch?->batch_id,
+                'realizations' => $submissions->map(fn ($item) => [
+                    'id' => $item->id, 'lesson_id' => $item->lesson_id, 'lesson_title' => $item->lesson_title,
+                    'category_name' => $item->category_name, 'realization' => $item->realization,
+                    'submitted_at' => $item->submitted_at,
+                ])->values()];
+        }));
+        $realizations = $studentPage;
 
         $categories = Category::withTrashed()->orderBy('sort_order')->orderBy('id')->get(['id', 'name', 'deleted_at']);
         $lessons = empty($filters['category_id']) ? collect() : Lesson::withTrashed()

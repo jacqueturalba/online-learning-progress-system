@@ -123,8 +123,8 @@ it('builds admin dashboard summaries from student learning records', function ()
         ->assertJsonPath('total_lessons', 2)
         ->assertJsonPath('completed_lessons', 1)
         ->assertJsonPath('transfer_eligible_students', 1)
-        ->assertJsonPath('students_by_category.0.students_count', 1)
-        ->assertJsonPath('students_by_category.1.students_count', 1)
+        ->assertJsonPath('students_by_category.data.0.students_count', 1)
+        ->assertJsonPath('students_by_category.data.1.students_count', 1)
         ->assertJsonPath('recent_activity.0.student_name', $student->name)
         ->assertJsonPath('recent_activity.0.lesson_title', $basicLesson->title);
 });
@@ -136,7 +136,7 @@ it('lists students with server-side search, category and pace filters, and pagin
     $student->update(['name' => 'Sam Searchable', 'pace_group' => 'A']);
     StudentCategoryProgress::create(['student_id' => $student->id, 'category_id' => $category->id, 'started_at' => now()]);
 
-    foreach (range(1, 21) as $number) {
+    foreach (range(1, 25) as $number) {
         makeStudent("page-{$number}@example.test");
     }
 
@@ -149,7 +149,7 @@ it('lists students with server-side search, category and pace filters, and pagin
 
     $this->getJson('/api/admin/students?search=searchable@example.test')->assertJsonPath('students.total', 1);
     $this->getJson('/api/admin/students?search=Sam%20Searchable')->assertJsonPath('students.total', 1);
-    $this->getJson('/api/admin/students')->assertJsonPath('students.per_page', 20)->assertJsonPath('students.total', 22)->assertJsonPath('students.last_page', 2);
+    $this->getJson('/api/admin/students')->assertJsonPath('students.per_page', 25)->assertJsonPath('students.total', 26)->assertJsonPath('students.last_page', 2);
 });
 
 it('shows private student history and active batch Zoom access to admins and allows pace changes only', function () {
@@ -520,9 +520,9 @@ it('creates, orders, edits, archives, and restores database-driven categories wi
         'name' => 'Applied Robotics', 'sort_order' => 2, 'is_active' => false,
     ])->assertOk()->assertJsonPath('category.sort_order', 2)->assertJsonPath('category.is_active', false);
 
-    $list = $this->getJson('/api/admin/categories')->assertOk()->assertJsonPath('categories.0.name', 'Applied Robotics')
-        ->assertJsonPath('categories.0.lessons_count', 1)->assertJsonPath('categories.1.name', 'Learning practice');
-    expect($list->json('categories.0.deleted_at'))->toBeNull();
+    $list = $this->getJson('/api/admin/categories')->assertOk()->assertJsonPath('categories.data.0.name', 'Applied Robotics')
+        ->assertJsonPath('categories.data.0.lessons_count', 1)->assertJsonPath('categories.data.1.name', 'Learning practice');
+    expect($list->json('categories.data.0.deleted_at'))->toBeNull();
 
     $this->deleteJson("/api/admin/categories/{$category->id}")->assertOk()->assertJsonPath('archived', true);
     $archived = Category::withTrashed()->findOrFail($category->id);
@@ -530,8 +530,8 @@ it('creates, orders, edits, archives, and restores database-driven categories wi
     expect($archived->is_active)->toBeFalse();
     expect(Lesson::find($lesson->id))->not->toBeNull();
     expect(StudentLessonProgress::where('student_id', $student->id)->where('lesson_id', $lesson->id)->exists())->toBeTrue();
-    $this->getJson('/api/admin/categories')->assertJsonPath('categories.0.id', $category->id)
-        ->assertJsonPath('categories.0.lessons_count', 1);
+    $this->getJson('/api/admin/categories')->assertJsonPath('categories.data.0.id', $category->id)
+        ->assertJsonPath('categories.data.0.lessons_count', 1);
     $learning = $this->actingAs($student)->getJson('/api/learning')->assertOk();
     expect(collect($learning->json('categories'))->pluck('id'))->not->toContain($category->id);
 

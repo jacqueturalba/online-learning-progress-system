@@ -37,7 +37,7 @@ function batchAttendanceTestSetup(): array
 it('shows all batch students including absentees and keeps classifications stable until explicit recalculation', function () {
     [$admin, $students, $batch, $occurrence] = batchAttendanceTestSetup();
     $this->actingAs($admin)->getJson('/api/admin/batch-attendance?batch_id='.$batch->id)->assertOk()
-        ->assertJsonCount(3, 'rows')->assertJsonFragment(['student_id' => $students[0]->id, 'occurrence_'.$occurrence->id => 'O'])
+        ->assertJsonCount(3, 'rows.data')->assertJsonPath('rows.total', 3)->assertJsonPath('rows.per_page', 25)->assertJsonFragment(['student_id' => $students[0]->id, 'occurrence_'.$occurrence->id => 'O'])
         ->assertJsonFragment(['student_id' => $students[1]->id, 'occurrence_'.$occurrence->id => 'L'])
         ->assertJsonFragment(['student_id' => $students[2]->id, 'occurrence_'.$occurrence->id => 'X'])
         ->assertJsonPath('occurrences.0.summary.O', 1)->assertJsonPath('occurrences.0.summary.X', 1);
@@ -49,6 +49,19 @@ it('shows all batch students including absentees and keeps classifications stabl
     expect(ZoomAttendanceOccurrenceStudent::where('occurrence_id', $occurrence->id)->where('student_id', $students[1]->id)->value('attendance_code'))->toBe('L');
     $this->postJson('/api/admin/batch-attendance/recalculate', ['batch_id' => $batch->id])->assertOk();
     expect(ZoomAttendanceOccurrenceStudent::where('occurrence_id', $occurrence->id)->where('student_id', $students[1]->id)->value('attendance_code'))->toBe('Review');
+});
+
+it('paginates batch attendance students while retaining whole-occurrence summaries', function () {
+    [$admin, $students, $batch, $occurrence] = batchAttendanceTestSetup();
+    foreach (range(4, 27) as $number) {
+        $student = batchAttendanceTestUser('student', "attendance-page{$number}@example.test");
+        ZoomBatchMembership::create(['zoom_batch_id' => $batch->id, 'student_id' => $student->id, 'status' => 'active', 'joined_at' => now(), 'created_by' => $admin->id]);
+    }
+
+    $this->actingAs($admin)->getJson('/api/admin/batch-attendance?batch_id='.$batch->id.'&page=2')->assertOk()
+        ->assertJsonPath('rows.current_page', 2)->assertJsonPath('rows.last_page', 2)
+        ->assertJsonPath('rows.total', 27)->assertJsonCount(2, 'rows.data')
+        ->assertJsonPath('occurrences.0.summary.O', 1)->assertJsonPath('occurrences.0.summary.X', 1);
 });
 
 it('records manual make-up attendance with actor and timestamp and preserves it during recalculation only when applicable', function () {
