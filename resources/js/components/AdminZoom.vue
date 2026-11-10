@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import AdminZoomBatches from './AdminZoomBatches.vue';
+defineProps<{ canManageIntegration: boolean }>();
 
 type Assignment = { zoom_url: string; is_active: boolean; updated_at: string } | null;
 type StudentRow = { id: number; name: string; pseudocode: string; zoom_assignment: Assignment; active_batch: { id: number; name: string; session: { id: number; topic: string; scheduled_at: string; recurrence: Record<string, unknown> | null } | null; registration_status: string; join_url: string | null; registration_error: string | null } | null };
@@ -52,6 +53,14 @@ async function saveCredentials(event: Event) {
   } catch (caught) { error.value = (caught as Error).message; }
   finally { savingCredentials.value = false; }
 }
+async function deleteCredentials() {
+  savingCredentials.value = true; error.value = ''; notice.value = '';
+  try {
+    const response = await fetch('/api/admin/zoom/credentials', { method: 'DELETE', credentials: 'same-origin', headers: { Accept: 'application/json', 'X-CSRF-TOKEN': csrf() } });
+    const data = await readResponse(response); credentialsConfigured.value = false; credentialsUpdatedAt.value = null; notice.value = data.message;
+  } catch (caught) { error.value = (caught as Error).message; }
+  finally { savingCredentials.value = false; }
+}
 async function testConnection() {
   testingConnection.value = true; error.value = ''; notice.value = ''; diagnostic.value = null;
   try {
@@ -82,21 +91,23 @@ onMounted(() => { void load(); });
 
 <template>
   <div class="admin-zoom-page">
-    <section class="zoom-settings-panel">
+    <details v-if="canManageIntegration" class="zoom-settings-panel zoom-section-collapse" open>
+      <summary><strong>Zoom integration</strong><span>Credentials, connection checks, and integration controls</span></summary>
       <div class="category-editor-heading"><div><p class="eyebrow">ZOOM INTEGRATION</p><h2>Zoom settings</h2></div><span class="category-state" :class="credentialsConfigured ? 'available' : 'unavailable'">{{ credentialsConfigured ? 'Configured' : 'Not configured' }}</span></div>
       <p class="zoom-settings-copy">Add the Zoom Server-to-Server OAuth account credentials. Values are encrypted on the server and are never returned to this page. Leave fields blank when updating to keep their current values.</p>
       <form class="zoom-credentials-form" @submit.prevent="saveCredentials">
         <label>Account ID<input name="account_id" type="password" autocomplete="new-password" maxlength="255" :required="!credentialsConfigured" :placeholder="credentialsConfigured ? 'Leave blank to keep current value' : 'Zoom account ID'"></label>
         <label>Client ID<input name="client_id" type="password" autocomplete="new-password" maxlength="255" :required="!credentialsConfigured" :placeholder="credentialsConfigured ? 'Leave blank to keep current value' : 'Zoom client ID'"></label>
         <label>Client secret<input name="client_secret" type="password" autocomplete="new-password" maxlength="255" :required="!credentialsConfigured" :placeholder="credentialsConfigured ? 'Leave blank to keep current value' : 'Zoom client secret'"></label>
-        <div class="zoom-credentials-footer"><span>Last updated: {{ formatDate(credentialsUpdatedAt) }}</span><div><button v-if="credentialsConfigured" type="button" class="secondary-button" :disabled="refreshingToken" @click="refreshToken">{{ refreshingToken ? 'Refreshing…' : 'Refresh OAuth token' }}</button><button v-if="credentialsConfigured" type="button" class="secondary-button" :disabled="testingConnection" @click="testConnection">{{ testingConnection ? 'Checking…' : 'Run diagnostics' }}</button><button class="primary" :disabled="savingCredentials">{{ savingCredentials ? 'Saving…' : credentialsConfigured ? 'Update credentials' : 'Save credentials' }}</button></div></div>
+        <div class="zoom-credentials-footer"><span>Last updated: {{ formatDate(credentialsUpdatedAt) }}</span><div><button v-if="credentialsConfigured" type="button" class="secondary-button" :disabled="refreshingToken" @click="refreshToken">{{ refreshingToken ? 'Refreshing…' : 'Refresh OAuth token' }}</button><button v-if="credentialsConfigured" type="button" class="secondary-button" :disabled="testingConnection" @click="testConnection">{{ testingConnection ? 'Checking…' : 'Run diagnostics' }}</button><button v-if="credentialsConfigured" type="button" class="secondary-button" :disabled="savingCredentials" @click="deleteCredentials">Disable Zoom integration</button><button class="primary" :disabled="savingCredentials">{{ savingCredentials ? 'Saving…' : credentialsConfigured ? 'Update credentials' : 'Save credentials' }}</button></div></div>
       </form>
       <div v-if="diagnostic" class="zoom-diagnostic-results" role="status"><h3>Zoom connection diagnostics</h3><p>Credentials: <strong>{{ diagnostic.credentials_configured ? 'Configured' : 'Missing' }}</strong></p><p>Fresh OAuth token: <strong>{{ diagnostic.token_obtained ? 'Obtained' : 'Failed' }}</strong></p><p>Zoom API connection: <strong>{{ diagnostic.api_connected ? `Connected${diagnostic.account ? ` as ${diagnostic.account}` : ''}` : 'Failed' }}</strong></p><p>Required scopes: <strong>Not independently verified</strong> · {{ diagnostic.scope_message }}</p><p v-if="diagnostic.error" class="student-error">{{ diagnostic.error }}<span v-if="diagnostic.http_status"> (HTTP {{ diagnostic.http_status }})</span></p></div>
-    </section>
+    </details>
 
     <AdminZoomBatches />
 
-    <section class="zoom-assignments-panel">
+    <details class="zoom-assignments-panel zoom-section-collapse" open>
+      <summary><strong>Student Zoom assignments</strong><span>Review student access and batch links</span></summary>
       <div class="category-editor-heading"><div><p class="eyebrow">STUDENT ACCESS</p><h2>Zoom assignments <span class="category-total">{{ total }}</span></h2></div></div>
       <p v-if="notice" class="category-notice" role="status">{{ notice }}</p><p v-if="error" class="student-error" role="alert">{{ error }}</p>
       <div class="zoom-assignment-filters"><label>Search students<input v-model="search" type="search" placeholder="Name or pseudocode" @input="searchChanged"></label><label>Assignment status<select v-model="status" @change="filterChanged"><option value="all">All students</option><option value="batch">Active batch</option><option value="unassigned">No active batch</option><option value="failed">Failed registration</option></select></label></div>
@@ -109,6 +120,6 @@ onMounted(() => { void load(); });
         </article>
       </div>
       <div v-if="lastPage > 1" class="lesson-pagination"><button class="secondary-button" :disabled="page <= 1" @click="page--; load()">Previous</button><span>Page {{ page }} of {{ lastPage }}</span><button class="secondary-button" :disabled="page >= lastPage" @click="page++; load()">Next</button></div>
-    </section>
+    </details>
   </div>
 </template>

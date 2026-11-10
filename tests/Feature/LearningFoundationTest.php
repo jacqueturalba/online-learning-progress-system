@@ -633,6 +633,7 @@ it('reports filtered progress from saved student learning records', function () 
 });
 it('encrypts Zoom integration credentials and manages student-specific links', function () {
     $admin = makeAdmin();
+    $admin->update(['role' => 'super_admin']);
     $student = makeStudent();
     $pseudocode = $student->pseudocode;
 

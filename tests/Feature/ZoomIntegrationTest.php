@@ -30,7 +30,7 @@ it('tests the saved Zoom connection without returning credentials or access toke
         'https://zoom.us/oauth/token' => Http::response(['access_token' => 'private-token-value', 'expires_in' => 3600], 200),
         'https://api.zoom.us/v2/users/me' => Http::response(['id' => 'host-1', 'display_name' => 'Zoom Host', 'email' => 'host@example.test'], 200),
     ]);
-    $admin = zoomIntegrationUser('admin', 'zoom-admin-integration@example.test');
+    $admin = zoomIntegrationUser('super_admin', 'zoom-admin-integration@example.test');
     $this->actingAs($admin)->postJson('/api/admin/zoom/test-connection')->assertOk()
         ->assertJsonPath('connected', true)->assertJsonPath('message', 'Connected to Zoom as Zoom Host.')
         ->assertJsonMissing(['access_token' => 'private-token-value']);
@@ -47,7 +47,7 @@ it('force refreshes only the cached Zoom token and obtains a new OAuth token', f
         return Http::response([], 404);
     });
     app(\App\Services\ZoomApiService::class)->testConnection();
-    $admin = zoomIntegrationUser('admin', 'zoom-admin-refresh@example.test');
+    $admin = zoomIntegrationUser('super_admin', 'zoom-admin-refresh@example.test');
     $this->actingAs($admin)->postJson('/api/admin/zoom/refresh-token')->assertOk()
         ->assertJsonPath('refreshed', true)->assertJsonMissing(['access_token' => 'new-private-token']);
     expect($tokenRequests)->toBe(2);
@@ -59,7 +59,7 @@ it('diagnoses fresh token and API connectivity without claiming that scopes were
         'https://zoom.us/oauth/token' => Http::response(['access_token' => 'private-diagnostic-token', 'expires_in' => 3600], 200),
         'https://api.zoom.us/v2/users/me' => Http::response(['id' => 'host-1', 'display_name' => 'Zoom Host'], 200),
     ]);
-    $admin = zoomIntegrationUser('admin', 'zoom-admin-diagnostics@example.test');
+    $admin = zoomIntegrationUser('super_admin', 'zoom-admin-diagnostics@example.test');
     $this->actingAs($admin)->postJson('/api/admin/zoom/diagnostics')->assertOk()
         ->assertJsonPath('credentials_configured', true)->assertJsonPath('token_obtained', true)
         ->assertJsonPath('api_connected', true)->assertJsonPath('scopes_verified', false)
@@ -71,7 +71,7 @@ it('returns the sanitized Zoom API error and status from the connection check', 
         'https://zoom.us/oauth/token' => Http::response(['access_token' => 'private-token-value', 'expires_in' => 3600], 200),
         'https://api.zoom.us/v2/users/me' => Http::response(['code' => 200, 'message' => 'Insufficient permissions to access this resource.'], 403),
     ]);
-    $admin = zoomIntegrationUser('admin', 'zoom-admin-api-error@example.test');
+    $admin = zoomIntegrationUser('super_admin', 'zoom-admin-api-error@example.test');
     $this->actingAs($admin)->postJson('/api/admin/zoom/test-connection')->assertStatus(422)
         ->assertJsonPath('connected', false)->assertJsonPath('http_status', 403)
         ->assertJsonPath('message', 'Insufficient permissions to access this resource.');

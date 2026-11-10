@@ -45,7 +45,41 @@ async function changePassword(event: Event) {
       <summary><h2>Profile</h2><span class="collapse-action">Collapse</span></summary>
       <div class="profile-collapsible-content">
       <dl><div><dt>Name</dt><dd>{{ user.name }}</dd></div><div><dt>Email</dt><dd>{{ user.email }}</dd></div></dl>
-      <form class="profile-password-form" @submit.prevent="saveContact"><label>Country<input v-model="contact.country" list="profile-countries" required><datalist id="profile-countries"><option>Philippines</option><option>Singapore</option><option>United States</option><option>United Kingdom</option><option>Canada</option><option>Australia</option><option>Malaysia</option><option>Japan</option></datalist></label><label>Complete address<textarea v-model="contact.address" required rows="2"></textarea></label><label>Phone number<div class="phone-input"><select v-model="contact.phone_country_code" required><option value="">Calling code</option><option value="+63">Philippines +63</option><option value="+65">Singapore +65</option><option value="+1">US/Canada +1</option><option value="+44">UK +44</option><option value="+61">Australia +61</option><option value="+60">Malaysia +60</option><option value="+91">India +91</option></select><input v-model="contact.phone_number" inputmode="tel" required></div></label><p v-if="error" class="student-error" role="alert">{{ error }}</p><p v-if="notice" class="student-success" role="status">{{ notice }}</p><button class="primary" :disabled="saving">{{ saving?'Saving…':'Save contact information' }}</button></form>
+      <form class="profile-password-form" @submit.prevent="saveContact">
+        <label>
+          Country
+          <input v-model="contact.country" list="profile-countries" required>
+          <datalist id="profile-countries">
+            <option>Philippines</option>
+            <option>Singapore</option>
+            <option>United States</option>
+            <option>United Kingdom</option>
+            <option>Canada</option>
+            <option>Australia</option>
+            <option>Malaysia</option>
+            <option>Japan</option>
+          </datalist>
+        </label>
+        <label>Complete address<textarea v-model="contact.address" required rows="2"></textarea></label>
+        <label>Phone number
+          <div class="phone-input">
+            <select v-model="contact.phone_country_code" required>
+              <option value="">Calling code</option>
+              <option value="+63">Philippines +63</option>
+              <option value="+65">Singapore +65</option>
+              <option value="+1">US/Canada +1</option>
+              <option value="+44">UK +44</option>
+              <option value="+61">Australia +61</option>
+              <option value="+60">Malaysia +60</option>
+              <option value="+91">India +91</option>
+            </select>
+            <input v-model="contact.phone_number" inputmode="tel" required>
+          </div>
+        </label>
+        <p v-if="error" class="student-error" role="alert">{{ error }}</p>
+        <p v-if="notice" class="student-success" role="status">{{ notice }}</p><br/>
+        <button class="primary" :disabled="saving">{{ saving?'Saving…':'Save contact information' }}</button>
+      </form>
       </div>
     </details>
     <details class="student-info-card profile-password-card profile-collapsible" aria-labelledby="profile-password-title">

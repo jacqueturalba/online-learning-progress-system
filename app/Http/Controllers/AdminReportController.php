@@ -25,6 +25,7 @@ class AdminReportController extends Controller
             'category_id' => ['nullable', 'integer', 'exists:categories,id'],
             'batch_id' => ['nullable', 'string', 'regex:/^(none|[1-9][0-9]*)$/'],
             'meeting_id' => ['nullable', 'integer', 'min:1'],
+            'occurrence_uuid' => ['nullable', 'string', 'max:191'],
             'date_from' => ['nullable', 'date_format:Y-m-d'],
             'date_to' => ['nullable', 'date_format:Y-m-d'],
             'page' => ['nullable', 'integer', 'min:1'],
@@ -198,7 +199,7 @@ class AdminReportController extends Controller
             ->when(! empty($filters['category_id']), fn ($query) => $query->where('category_id', (int) $filters['category_id']))
             ->when(($filters['batch_id'] ?? null) === 'none', fn ($query) => $query->whereNull('zoom_batch_id'))
             ->when(! empty($filters['batch_id']) && $filters['batch_id'] !== 'none', fn ($query) => $query->where('zoom_batch_id', (int) $filters['batch_id']))
-            ->with(['zoomBatch', 'attendanceRecords:id,zoom_session_id,raw_data,joined_at'])->orderBy('title')->orderBy('scheduled_at')->get();
+            ->with(['zoomBatch', 'attendanceRecords:id,zoom_session_id,zoom_meeting_uuid,raw_data,joined_at'])->orderBy('title')->orderBy('scheduled_at')->get();
 
         return [
             'categories' => Category::withTrashed()->orderBy('sort_order')->orderBy('id')->get(['id', 'name', 'deleted_at']),
@@ -206,6 +207,12 @@ class AdminReportController extends Controller
             'meetings' => $sessions->map(fn (ZoomSession $session) => ['id' => $session->id, 'title' => $session->title, 'batch_id' => $session->zoom_batch_id,
                 'occurrence_dates' => ($filters['report'] ?? null) === 'meeting_attendance'
                     ? $session->attendanceRecords->map(fn ($record) => data_get($record->raw_data, 'occurrence_start_time') ?: $record->joined_at?->toIso8601String())->filter()->unique()->sort()->values()
+                    : [],
+                'occurrences' => ($filters['report'] ?? null) === 'meeting_attendance'
+                    ? $session->attendanceRecords->groupBy('zoom_meeting_uuid')->map(fn ($records, $uuid) => ['uuid' => $uuid,
+                        'started_at' => $records->map(fn ($record) => data_get($record->raw_data, 'occurrence_start_time'))->filter()->first() ?: $records->first()?->joined_at?->toIso8601String()])
+                        ->filter(fn ($occurrence) => is_string($occurrence['uuid']) && $occurrence['uuid'] !== '')
+                        ->sortBy('started_at')->values()
                     : [],
             ])->values(),
             'pace_groups' => app(AdminPaceGroupController::class)->options(),
@@ -223,6 +230,7 @@ class AdminReportController extends Controller
             ->when(($filters['batch_id'] ?? null) === 'none', fn ($q) => $q->whereNull('zs.zoom_batch_id'))
             ->when(! empty($filters['batch_id']) && $filters['batch_id'] !== 'none', fn ($q) => $q->where('zs.zoom_batch_id', (int) $filters['batch_id']))
             ->when($filters['meeting_id'] ?? null, fn ($q, $id) => $q->where('zs.id', $id))
+            ->when($filters['occurrence_uuid'] ?? null, fn ($q, $uuid) => $q->where('ar.zoom_meeting_uuid', $uuid))
             ->when(($filters['status'] ?? 'all') === 'matched', fn ($q) => $q->whereIn('ar.match_status', ['matched', 'manually_matched']))
             ->when(($filters['status'] ?? 'all') === 'unmatched', fn ($q) => $q->where('ar.match_status', 'unmatched'))
             ->select([

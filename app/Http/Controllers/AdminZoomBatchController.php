@@ -8,8 +8,11 @@ use App\Models\ZoomBatch;
 use App\Models\ZoomBatchMembership;
 use App\Models\ZoomSession;
 use App\Models\ZoomAttendanceRecord;
+use App\Models\ZoomAttendanceOccurrence;
+use App\Models\ZoomAttendanceSetting;
 use App\Services\ZoomApiException;
 use App\Services\ZoomApiService;
+use App\Services\ZoomAttendanceClassifier;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
@@ -41,6 +44,44 @@ class AdminZoomBatchController extends Controller
     public function show(ZoomBatch $batch)
     {
         return response()->json(['batch' => $this->details($batch)]);
+    }
+
+    public function startMeeting(Request $request, ZoomBatch $batch, ZoomApiService $zoom)
+    {
+        $session = $batch->zoomSessions()->whereNotNull('zoom_meeting_id')->latest('id')->first();
+        abort_unless($session, 422, 'This batch does not have a Zoom meeting configured.');
+        abort_unless(is_string($session->zoom_meeting_id) && trim($session->zoom_meeting_id) !== '', 422, 'This batch does not have a valid Zoom meeting ID.');
+        abort_unless(is_string($session->zoom_host_id) && trim($session->zoom_host_id) !== '', 422, 'This meeting does not have a valid assigned Zoom host. Reconfigure the meeting host before starting it.');
+
+        try {
+            $user = $request->user();
+            $isSuperAdmin = $user->role === 'super_admin';
+            $isAssignedBatchAdmin = $user->role === 'admin' && (int) $batch->created_by === (int) $user->id;
+            $isAssignedZoomHost = false;
+            if (! $isSuperAdmin && ! $isAssignedBatchAdmin && $user->role === 'admin') {
+                $assignedHostId = (string) $session->zoom_host_id;
+                $host = $zoom->user($assignedHostId);
+                $isAssignedZoomHost = (string) ($host['id'] ?? '') === $assignedHostId
+                    && is_string($host['email'] ?? null)
+                    && mb_strtolower(trim($host['email'])) === mb_strtolower(trim($user->email));
+            }
+
+            abort_unless($isSuperAdmin || $isAssignedBatchAdmin || $isAssignedZoomHost, 403,
+                'Only the assigned Zoom host, the batch’s assigned admin, or a super admin can start this meeting.');
+
+            // Only authorized callers reach the Zoom API response containing its private start URL.
+            $meeting = $zoom->meeting((string) $session->zoom_meeting_id);
+            $actualHostId = (string) ($meeting['host_id'] ?? '');
+            abort_unless($actualHostId !== '' && hash_equals((string) $session->zoom_host_id, $actualHostId), 422,
+                'The Zoom meeting host no longer matches this batch’s assigned host. Reconfigure the meeting host before starting it.');
+        } catch (ZoomApiException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 422);
+        }
+        $startUrl = $meeting['start_url'] ?? null;
+        $startHost = is_string($startUrl) ? strtolower((string) parse_url($startUrl, PHP_URL_HOST)) : '';
+        abort_unless(is_string($startUrl) && parse_url($startUrl, PHP_URL_SCHEME) === 'https'
+            && ($startHost === 'zoom.us' || str_ends_with($startHost, '.zoom.us')), 422, 'Zoom did not return a valid secure host start link.');
+        return redirect()->away($startUrl);
     }
 
     public function students()
@@ -241,7 +282,7 @@ class AdminZoomBatchController extends Controller
         return response()->json(['results' => $results, 'batch' => $this->details($batch->fresh())]);
     }
 
-    public function syncAttendance(Request $request, ZoomBatch $batch, ZoomSession $session, ZoomApiService $zoom)
+    public function syncAttendance(Request $request, ZoomBatch $batch, ZoomSession $session, ZoomApiService $zoom, ZoomAttendanceClassifier $classifier)
     {
         abort_unless((int) $session->zoom_batch_id === (int) $batch->id && $session->zoom_meeting_id, 404);
         $range = $request->validate(['from' => ['nullable', 'date_format:Y-m-d'], 'to' => ['nullable', 'date_format:Y-m-d']]);
@@ -284,11 +325,22 @@ class AdminZoomBatchController extends Controller
             }
 
             foreach ($meetingInstances as $uuid => $occurrence) {
+                $occurrenceStart = ! empty($occurrence['start_time']) ? Carbon::parse($occurrence['start_time']) : null;
+                $actualDuration = ! empty($occurrence['duration']) ? (int) $occurrence['duration'] * 60
+                    : (! empty($occurrence['start_time']) && ! empty($occurrence['end_time'])
+                        ? max(0, Carbon::parse($occurrence['start_time'])->diffInSeconds(Carbon::parse($occurrence['end_time'])))
+                        : 0);
+                $durationSeconds = $actualDuration > 0 ? $actualDuration : (int) (data_get($session->recurrence_config, 'duration', 0) * 60);
+                $attendanceOccurrence = ZoomAttendanceOccurrence::query()->firstOrNew(['zoom_session_id' => $session->id, 'meeting_uuid' => (string) $uuid]);
+                $attendanceOccurrence->fill(['started_at' => $occurrenceStart, 'duration_seconds' => max(0, $durationSeconds), 'sync_status' => 'syncing']);
+                $attendanceOccurrence->save();
+                $occurrenceParticipants = 0;
                 $token = null;
                 do {
                     $page = $zoom->pastMeetingParticipants((string) $uuid, $token);
                     foreach ($page['participants'] ?? [] as $participant) {
                         $participantsRetrieved++;
+                        $occurrenceParticipants++;
                         $registrantId = $participant['registrant_id'] ?? null;
                         $name = trim((string) ($participant['name'] ?? $participant['user_name'] ?? ''));
                         $pseudocode = $this->pseudocodeFromName($name);
@@ -341,6 +393,8 @@ class AdminZoomBatchController extends Controller
                     }
                     $token = $page['next_page_token'] ?? null;
                 } while ($token);
+                $attendanceOccurrence->fill(['participants_detected' => $occurrenceParticipants, 'synced_at' => now(), 'sync_status' => 'completed'])->save();
+                $classifier->classify($attendanceOccurrence);
             }
             $session->forceFill(['last_synced_at' => now()])->save();
         } catch (ZoomApiException $exception) {
@@ -361,10 +415,14 @@ class AdminZoomBatchController extends Controller
         }
 
         $noAttendance = $participantsRetrieved === 0;
+        $latest = ZoomAttendanceOccurrence::query()->where('zoom_session_id', $session->id)->orderByDesc('started_at')->orderByDesc('id')->first();
         return response()->json(['message' => $noAttendance ? 'No historical attendance participants were returned by Zoom for this meeting and date range.' : 'Attendance sync completed.',
             'no_historical_attendance' => $noAttendance, 'meetings_retrieved' => count($meetingInstances),
             'participants_retrieved' => $participantsRetrieved, 'matched' => $matched, 'unmatched' => $unmatched,
-            'occurrences' => count($meetingInstances), 'last_synced_at' => $session->last_synced_at]);
+            'occurrences' => count($meetingInstances), 'last_synced_at' => $session->last_synced_at,
+            'latest_occurrence' => $latest ? ['meeting_date' => $latest->started_at, 'occurrence_id' => $latest->meeting_uuid,
+                'sync_completed_at' => $latest->synced_at, 'participants_detected' => $latest->participants_detected,
+                'sync_status' => $latest->sync_status, 'duration_seconds' => $latest->duration_seconds] : null]);
     }
 
     public function attendance(ZoomBatch $batch, ZoomSession $session)
@@ -381,7 +439,11 @@ class AdminZoomBatchController extends Controller
                 'joined_at' => $record->joined_at, 'left_at' => $record->left_at, 'duration_seconds' => $record->duration_seconds,
                 'match_status' => $record->match_status,
             ]);
-        return response()->json(['matched' => $rows->whereIn('match_status', ['matched', 'manually_matched'])->values(), 'unmatched' => $rows->where('match_status', 'unmatched')->values(), 'last_synced_at' => $session->last_synced_at]);
+        $latest = ZoomAttendanceOccurrence::query()->where('zoom_session_id', $session->id)->latest('started_at')->first();
+        return response()->json(['matched' => $rows->whereIn('match_status', ['matched', 'manually_matched'])->values(), 'unmatched' => $rows->where('match_status', 'unmatched')->values(), 'last_synced_at' => $session->last_synced_at,
+            'latest_occurrence' => $latest ? ['meeting_date' => $latest->started_at, 'occurrence_id' => $latest->meeting_uuid,
+                'sync_completed_at' => $latest->synced_at, 'participants_detected' => $latest->participants_detected,
+                'sync_status' => $latest->sync_status, 'duration_seconds' => $latest->duration_seconds] : null]);
     }
 
     private function validateBatch(Request $request): array
