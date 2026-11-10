@@ -50,12 +50,15 @@ Route::prefix('/api/admin')->middleware(['auth', 'role:admin'])->group(function 
     Route::get('/reports', App\Http\Controllers\AdminReportController::class);
     Route::get('/insights/data', App\Http\Controllers\AdminInsightsController::class);
     Route::post('/transfers', [App\Http\Controllers\AdminTransferAnalysisController::class, 'store']);
+    Route::get('/batch-attendance', [App\Http\Controllers\AdminBatchAttendanceController::class, 'index']);
+    Route::get('/batch-attendance/settings', [App\Http\Controllers\AdminBatchAttendanceController::class, 'settings']);
+    Route::put('/batch-attendance/settings', [App\Http\Controllers\AdminBatchAttendanceController::class, 'updateSettings']);
+    Route::post('/batch-attendance/recalculate', [App\Http\Controllers\AdminBatchAttendanceController::class, 'recalculate']);
+    Route::put('/batch-attendance/{occurrence}/students/{student}', [App\Http\Controllers\AdminBatchAttendanceController::class, 'updateManual']);
     Route::get('/zoom', [App\Http\Controllers\AdminZoomController::class, 'index']);
-    Route::post('/zoom/credentials', [App\Http\Controllers\AdminZoomController::class, 'saveCredentials']);
     Route::put('/zoom/assignments/{student}', [App\Http\Controllers\AdminZoomController::class, 'saveAssignment']);
-    Route::post('/zoom/test-connection', [App\Http\Controllers\AdminZoomController::class, 'testConnection']);
-    Route::post('/zoom/refresh-token', [App\Http\Controllers\AdminZoomController::class, 'refreshToken']);
-    Route::post('/zoom/diagnostics', [App\Http\Controllers\AdminZoomController::class, 'diagnoseConnection']);
+    Route::get('/zoom/batches/{batch}/start', [App\Http\Controllers\AdminZoomBatchController::class, 'startMeeting'])->name('admin.zoom.batch.start');
+    Route::post('/zoom/batches/{batch}/start', [App\Http\Controllers\AdminZoomBatchController::class, 'startMeeting']);
     Route::get('/zoom/batches', [App\Http\Controllers\AdminZoomBatchController::class, 'index']);
     Route::post('/zoom/batches', [App\Http\Controllers\AdminZoomBatchController::class, 'store']);
     Route::get('/zoom/batches/students', [App\Http\Controllers\AdminZoomBatchController::class, 'students']);
@@ -74,4 +77,11 @@ Route::prefix('/api/admin')->middleware(['auth', 'role:admin'])->group(function 
     Route::post('/lessons/{lesson}/restore', [App\Http\Controllers\AdminLessonController::class, 'restore']);
     Route::patch('/lessons/{lesson}/move', [App\Http\Controllers\AdminLessonController::class, 'move']);
     Route::apiResource('lessons', App\Http\Controllers\AdminLessonController::class)->only(['index', 'store', 'update', 'destroy']);
+});
+Route::prefix('/api/admin/zoom')->middleware(['auth', 'role:super_admin'])->group(function () {
+    Route::post('/credentials', [App\Http\Controllers\AdminZoomController::class, 'saveCredentials']);
+    Route::delete('/credentials', [App\Http\Controllers\AdminZoomController::class, 'deleteCredentials']);
+    Route::post('/test-connection', [App\Http\Controllers\AdminZoomController::class, 'testConnection']);
+    Route::post('/refresh-token', [App\Http\Controllers\AdminZoomController::class, 'refreshToken']);
+    Route::post('/diagnostics', [App\Http\Controllers\AdminZoomController::class, 'diagnoseConnection']);
 });

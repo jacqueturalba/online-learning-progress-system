@@ -91,6 +91,13 @@ class AdminZoomController extends Controller
         ]);
     }
 
+    public function deleteCredentials(ZoomApiService $zoom)
+    {
+        ZoomIntegrationSetting::query()->first()?->delete();
+        $zoom->forgetToken();
+        return response()->json(['message' => 'Zoom integration was disabled. Its encrypted settings were soft-deleted and can be replaced by configuring the integration again.']);
+    }
+
     public function testConnection(ZoomApiService $zoom)
     {
         try {

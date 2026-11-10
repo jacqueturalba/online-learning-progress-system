@@ -41,7 +41,13 @@ it('groups occurrence joins, retains the historical batch and keeps unmatched pa
     $meetingOption = collect($response->json('filters.meetings'))->firstWhere('id', $session->id);
     expect($meetingOption['occurrence_dates'])->toHaveCount(1)
         ->and($meetingOption['occurrence_dates'][0])->toContain($joinedAt->toDateString())
-        ->and($meetingOption['occurrence_dates'][0])->not->toContain($session->scheduled_at->toDateString());
+        ->and($meetingOption['occurrence_dates'][0])->not->toContain($session->scheduled_at->toDateString())
+        ->and($meetingOption['occurrences'])->toHaveCount(1)
+        ->and($meetingOption['occurrences'][0]['uuid'])->toBe('occurrence-one');
+
+    $selectedOccurrence = $this->getJson('/api/admin/reports?report=meeting_attendance&meeting_id='.$session->id.'&occurrence_uuid=occurrence-one')->assertOk();
+    expect($selectedOccurrence->json('rows.total'))->toBe(2)
+        ->and(collect($selectedOccurrence->json('rows.data'))->pluck('occurrence_uuid')->unique()->values()->all())->toBe(['occurrence-one']);
 
     $excel = $this->actingAs($admin)->get('/api/admin/reports?report=meeting_attendance&format=xlsx&batch_id='.$batch->id);
     $excel->assertOk()->assertHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');

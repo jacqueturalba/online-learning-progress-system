@@ -73,9 +73,19 @@ class ZoomApiService
         return $users;
     }
 
+    public function user(string $userId): array
+    {
+        return $this->request('GET', '/users/'.rawurlencode($userId));
+    }
+
     public function createMeeting(string $hostId, array $payload): array
     {
         return $this->request('POST', '/users/'.rawurlencode($hostId).'/meetings', $payload);
+    }
+
+    public function meeting(string $meetingId): array
+    {
+        return $this->request('GET', '/meetings/'.rawurlencode($meetingId));
     }
 
     public function register(string $meetingId, array $payload): array
@@ -164,7 +174,7 @@ class ZoomApiService
         });
     }
 
-    private function forgetToken(): void
+    public function forgetToken(): void
     {
         $settings = ZoomIntegrationSetting::query()->first();
         if ($settings) Cache::forget($this->tokenCacheKey($settings));

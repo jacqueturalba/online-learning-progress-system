@@ -376,6 +376,11 @@ button, a, input { -webkit-tap-highlight-color: transparent; }
 /* Admin Zoom settings and student assignments */
 .admin-zoom-page { display: grid; gap: 15px; }
 .zoom-settings-panel, .zoom-assignments-panel { min-width: 0; padding: 18px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.zoom-section-collapse > summary { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:-2px 0 16px; color:var(--text-primary); cursor:pointer; list-style:none; }
+.zoom-section-collapse > summary::-webkit-details-marker { display:none; }
+.zoom-section-collapse > summary::after { content:'⌄'; color:var(--text-secondary); font-size:18px; }
+.zoom-section-collapse:not([open]) > summary { margin-bottom:0; }
+.zoom-section-collapse > summary span { margin-left:auto; color:var(--text-secondary); font-size:12px; font-weight:400; }
 .zoom-settings-copy { max-width: 720px; margin: -4px 0 14px; color: var(--text-secondary); font-size:12px; line-height: 1.6; }
 .zoom-credentials-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; }
 .zoom-credentials-form > label, .zoom-assignment-filters > label { display: grid; gap: 6px; color: var(--text-primary); font-size:12px; font-weight: 600; }
@@ -521,11 +526,20 @@ button, a, input { -webkit-tap-highlight-color: transparent; }
 .profile-collapsible-content { padding:0 15px 15px; }
 .profile-summary .profile-password-form { grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr)); max-width:none; }
 .profile-summary .profile-password-form > label { min-width:0; }
-.profile-summary textarea { box-sizing:border-box; width:100%; min-height:72px; border:1px solid #87958b; border-radius:7px; padding:9px 10px; color:var(--text-primary); background:var(--surface); font:inherit; resize:vertical; }
+.profile-summary textarea { box-sizing:border-box; width:100%; min-height:60px; border:1px solid #dddddd; border-radius:7px; padding:9px 10px; color:var(--text-primary); background:var(--surface); font:inherit; resize:vertical; }
 .profile-summary textarea:focus { outline:0; border-color:var(--brand-blue); box-shadow:var(--focus-ring); }
+.profile-summary select { border: 1px solid #dddddd; border-radius: 7px; padding: 9px 10px;}
 .enrollment-step { display:contents; }
 .enrollment-mobile-navigation { display:none; }
 .enrollment-paper textarea { border-color:#89979f; }
+.phone-input select {
+    width: 75px;
+    text-align: right;
+    direction: rtl;
+}
+.phone-input input {
+    width: 100%;
+}
 :where(button, a, input, select, textarea):focus-visible { outline: 3px solid var(--brand-blue); outline-offset: 2px; }
 body { line-height: 1.5; }
 button, input, select, textarea { font-size: max(14px, 1em); }
@@ -587,11 +601,35 @@ small { font-size: max(12px, 1em); }
 .report-heading h2 { margin: 2px 0 4px; color: var(--text-primary); font-size: 16px; }
 .report-heading > div > p:last-child { margin: 0; color: var(--text-secondary); font-size:12px; }
 .report-record-count { color: var(--text-secondary); font-size:12px; white-space: nowrap; }
-.report-filters { display: grid; grid-template-columns: minmax(180px, 1fr) repeat(2, minmax(130px, .6fr)) auto; align-items: end; gap: 9px; margin-bottom: 14px; }
-.report-filters label { display: grid; gap: 5px; color: var(--text-primary); font-size:12px; font-weight: 600; }
+.report-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr)); align-items: end; gap: 9px; margin-bottom: 14px; }
+.report-filters label { display: grid; min-width: 0; gap: 5px; color: var(--text-primary); font-size:12px; font-weight: 600; }
 .report-filters input, .report-filters select { box-sizing: border-box; width: 100%; min-height: 38px; padding: 8px 9px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); background: var(--surface); font: inherit; font-size:12px; font-weight: 400; }
 .report-filters input:focus, .report-filters select:focus { outline: 0; border-color: var(--brand-blue); box-shadow: var(--focus-ring); }
 .report-filters .primary { min-height: 38px; padding: 0 12px; font-size:12px; white-space: nowrap; }
+.report-filters .report-filter-category { max-width: 190px; }
+.report-filters .report-filter-batch { max-width: 180px; }
+.report-filters .report-filter-meeting { max-width: 230px; }
+.report-filters .report-filter-occurrence { max-width: 230px; }
+.report-filters > button { min-height: 38px; width: 100%; white-space: nowrap; }
+.batch-attendance-controls { display:flex; flex-wrap:wrap; align-items:end; gap:9px; margin-bottom:14px; }
+.batch-attendance-controls label { display:grid; gap:5px; width:min(100%,210px); color:var(--text-primary); font-size:12px; font-weight:600; }
+.batch-attendance-controls input,.batch-attendance-controls select { box-sizing:border-box; width:100%; min-height:38px; padding:8px 9px; border:1px solid var(--border); border-radius:6px; background:var(--surface); color:var(--text-primary); font:inherit; font-size:12px; }
+.batch-attendance-controls p { flex-basis:100%; margin:0; color:var(--text-secondary); font-size:12px; }
+.batch-attendance-table { min-width:1500px; border-collapse:separate; border-spacing:0; }
+.batch-attendance-table th,.batch-attendance-table td { min-width:105px; background:var(--surface); }
+.batch-attendance-table th { position:sticky; top:0; z-index:3; }
+.batch-attendance-table th:nth-child(-n+6),.batch-attendance-table td:nth-child(-n+6) { position:sticky; z-index:2; }
+.batch-attendance-table th:nth-child(1),.batch-attendance-table td:nth-child(1) { left:0; min-width:100px; }
+.batch-attendance-table th:nth-child(2),.batch-attendance-table td:nth-child(2) { left:100px; min-width:90px; }
+.batch-attendance-table th:nth-child(3),.batch-attendance-table td:nth-child(3) { left:190px; min-width:160px; }
+.batch-attendance-table th:nth-child(4),.batch-attendance-table td:nth-child(4) { left:350px; min-width:75px; }
+.batch-attendance-table th:nth-child(5),.batch-attendance-table td:nth-child(5) { left:425px; min-width:120px; }
+.batch-attendance-table th:nth-child(6),.batch-attendance-table td:nth-child(6) { left:545px; min-width:120px; box-shadow:2px 0 3px #0002; }
+.batch-attendance-table thead th:nth-child(-n+6) { z-index:5; }
+.batch-attendance-table .attendance-summary-row td { background:#edf3fa; font-size:12px; }
+.attendance-code-cell { text-align:center; }
+.attendance-code-cell button { display:block; margin:3px auto 0; padding:3px 6px; border:1px solid var(--border); border-radius:4px; background:var(--surface); color:var(--text-secondary); font-size:10px; }
+@media print { .batch-attendance-table-wrap { overflow:visible!important; } .batch-attendance-table { min-width:0; font-size:8px; } .batch-attendance-table th,.batch-attendance-table td { position:static!important; min-width:0!important; padding:3px!important; box-shadow:none!important; } .attendance-code-cell button { display:none; } }
 .transfer-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; margin-bottom: 13px; }
 .transfer-summary article { display: grid; gap: 6px; padding: 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--app-background); }
 .transfer-summary article span { color: var(--text-secondary); font-size:12px; }
