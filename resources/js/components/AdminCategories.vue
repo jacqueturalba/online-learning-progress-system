@@ -8,6 +8,8 @@ type Category = {
 };
 
 const categories = ref<Category[]>([]), loading = ref(false), saving = ref(false), error = ref(''), notice = ref('');
+const page = ref(1), lastPage = ref(1), total = ref(0);
+const maxSortOrder = ref(0);
 const editingId = ref<number | null>(null);
 const form = ref({ name: '', description: '', sort_order: 1, is_active: true, enable_first_lesson_access: false, unlock_all_lessons: false });
 const thumbnail = ref<File | null>(null), thumbnailPreview = ref<string | null>(null), removeThumbnail = ref(false), categoryColor = ref('#e8f2ea');
@@ -19,14 +21,14 @@ const headers = () => ({
   'X-CSRF-TOKEN': document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content || '',
 });
 
-async function loadCategories() {
+async function loadCategories(targetPage = page.value) {
   loading.value = true;
   error.value = '';
   try {
-    const response = await fetch('/api/admin/categories', { credentials: 'same-origin', headers: headers() });
+    const response = await fetch(`/api/admin/categories?page=${targetPage}`, { credentials: 'same-origin', headers: headers() });
     const body = await response.json();
     if (!response.ok) throw new Error(body.message || 'Categories could not be loaded.');
-    categories.value = body.categories;
+    categories.value = body.categories.data; page.value = body.categories.current_page; lastPage.value = body.categories.last_page; total.value = body.categories.total; maxSortOrder.value = body.max_sort_order;
   } catch (caught) {
     error.value = (caught as Error).message;
   } finally {
@@ -38,7 +40,7 @@ function startCreate() {
   editingId.value = null;
   form.value = {
     name: '', description: '',
-    sort_order: categories.value.reduce((largest, category) => Math.max(largest, category.sort_order), 0) + 1,
+    sort_order: maxSortOrder.value + 1,
     is_active: true, enable_first_lesson_access: false, unlock_all_lessons: false,
   };
   thumbnail.value = null; thumbnailPreview.value = null; removeThumbnail.value = false; categoryColor.value = '#e8f2ea';
@@ -82,7 +84,7 @@ async function saveCategory() {
     });
     const body = await response.json();
     if (!response.ok) throw new Error(body.message || Object.values(body.errors || {}).flat()[0] as string || 'Category could not be saved.');
-    await loadCategories();
+    await loadCategories(1);
     cancelEdit();
     notice.value = editing ? 'Category updated.' : 'Category added.';
   } catch (caught) {
@@ -148,7 +150,7 @@ onMounted(() => {
     </section>
 
     <section class="category-list-panel">
-      <div class="category-editor-heading"><div><p class="eyebrow">CURRICULUM STRUCTURE</p><h2>Categories <span class="category-total">{{ categories.length }}</span></h2></div><button class="primary category-add-button" @click="startCreate"><CirclePlus :size="16" /> Add category</button></div>
+      <div class="category-editor-heading"><div><p class="eyebrow">CURRICULUM STRUCTURE</p><h2>Categories <span class="category-total">{{ total }}</span></h2></div><button class="primary category-add-button" @click="startCreate"><CirclePlus :size="16" /> Add category</button></div>
       <p v-if="notice" class="category-notice" role="status"><Check :size="15" /> {{ notice }}</p>
       <p v-if="error && !isEditing" class="student-error" role="alert">{{ error }}</p>
       <div v-if="loading" class="category-empty-state">Loading categories…</div>
@@ -159,6 +161,7 @@ onMounted(() => {
           <div class="managed-category-actions"><button v-if="category.deleted_at" class="category-action restore" :aria-label="`Restore ${category.name}`" @click="restoreCategory(category)"><RotateCcw :size="15" /><span>Restore</span></button><template v-else><button class="category-action" :aria-label="`Edit ${category.name}`" @click="startEdit(category)"><Pencil :size="15" /><span>Edit</span></button><button class="category-action archive" :aria-label="`Archive ${category.name}`" @click="archiveCategory(category)"><Archive :size="15" /><span>Archive</span></button></template></div>
         </article>
       </div>
+      <div v-if="lastPage > 1" class="lesson-pagination"><button class="secondary-button" :disabled="page <= 1 || loading" @click="loadCategories(page - 1)">Previous</button><span>Page {{ page }} of {{ lastPage }} · {{ total }} categories</span><button class="secondary-button" :disabled="page >= lastPage || loading" @click="loadCategories(page + 1)">Next</button></div>
     </section>
   </div>
 </template>

@@ -34,7 +34,7 @@ class AdminLessonController extends Controller
         $query->when($filters['search'] ?? null, fn ($q, $term) => $q->where('title', 'like', '%'.$term.'%'));
 
         return response()->json([
-            'lessons' => $query->orderBy('category_id')->orderBy('sort_order')->orderBy('id')->paginate(50)->withQueryString()->through(fn ($lesson) => array_merge($lesson->toArray(), ['thumbnail_url' => $lesson->thumbnail_path ? Storage::disk('public')->url($lesson->thumbnail_path) : null])),
+            'lessons' => $query->orderBy('category_id')->orderBy('sort_order')->orderBy('id')->paginate(25)->withQueryString()->through(fn ($lesson) => array_merge($lesson->toArray(), ['thumbnail_url' => $lesson->thumbnail_path ? Storage::disk('public')->url($lesson->thumbnail_path) : null])),
             'categories' => Category::withTrashed()->orderBy('sort_order')->orderBy('id')->get(['id', 'name', 'deleted_at']),
         ]);
     }

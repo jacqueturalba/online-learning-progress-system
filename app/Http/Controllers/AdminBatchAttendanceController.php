@@ -12,6 +12,7 @@ use App\Models\ZoomBatchMembership;
 use App\Services\ReportXlsxExporter;
 use App\Services\ZoomAttendanceClassifier;
 use Illuminate\Http\Request;
+use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Validation\ValidationException;
 
 class AdminBatchAttendanceController extends Controller
@@ -33,19 +34,35 @@ class AdminBatchAttendanceController extends Controller
 
     public function index(Request $request, ReportXlsxExporter $exporter)
     {
-        $filters = $request->validate(['batch_id' => ['nullable','integer','exists:zoom_batches,id'], 'format' => ['nullable','in:xlsx']]);
+        $filters = $request->validate(['batch_id' => ['nullable','integer','exists:zoom_batches,id'], 'page' => ['nullable','integer','min:1'], 'format' => ['nullable','in:xlsx']]);
         $batches = ZoomBatch::withTrashed()->withCount(['memberships as student_count'])->orderBy('name')->get(['id','name','status','deleted_at']);
         $settings = ZoomAttendanceSetting::query()->first() ?? ZoomAttendanceSetting::query()->create([]);
         $batch = isset($filters['batch_id']) ? ZoomBatch::withTrashed()->findOrFail($filters['batch_id']) : null;
         $occurrences = $batch ? ZoomAttendanceOccurrence::query()->whereHas('session', fn ($q) => $q->where('zoom_batch_id', $batch->id))
             ->with('session:id,title,zoom_batch_id')->orderBy('started_at')->orderBy('id')->get() : collect();
-        $memberships = $batch ? ZoomBatchMembership::query()->with('student.enrollmentForms')->where('zoom_batch_id', $batch->id)->orderBy('joined_at')->get()->unique('student_id') : collect();
-        $codes = $occurrences->isNotEmpty() ? ZoomAttendanceOccurrenceStudent::query()->whereIn('occurrence_id', $occurrences->pluck('id'))->get()->keyBy(fn ($row) => $row->occurrence_id.'|'.$row->student_id) : collect();
+        $page = max(1, (int) ($filters['page'] ?? 1));
+        $membershipQuery = $batch ? ZoomBatchMembership::query()->where('zoom_batch_id', $batch->id) : null;
+        $membershipTotal = $membershipQuery ? (clone $membershipQuery)->distinct()->count('student_id') : 0;
+        if (($filters['format'] ?? null) === 'xlsx') {
+            $memberships = $membershipQuery?->with('student.enrollmentForms')->orderBy('joined_at')->get()->unique('student_id') ?? collect();
+        } else {
+            $studentPage = $membershipQuery
+                ? (clone $membershipQuery)->select('student_id')->distinct()->orderBy('student_id')->paginate(25)->withQueryString()
+                : new LengthAwarePaginator([], 0, 25, $page, ['path' => $request->url(), 'query' => $request->query()]);
+            $studentIds = $studentPage->getCollection()->pluck('student_id');
+            $memberships = $studentIds->isEmpty() ? collect() : ZoomBatchMembership::query()->with('student.enrollmentForms')
+                ->where('zoom_batch_id', $batch->id)->whereIn('student_id', $studentIds)->orderBy('joined_at')->get()->unique('student_id');
+        }
+        $codeSummaries = $occurrences->isNotEmpty() ? ZoomAttendanceOccurrenceStudent::query()->whereIn('occurrence_id', $occurrences->pluck('id'))
+            ->select('occurrence_id', 'attendance_code')->selectRaw('COUNT(*) as amount')->groupBy('occurrence_id', 'attendance_code')->get()->groupBy('occurrence_id') : collect();
+        $codesQuery = $occurrences->isNotEmpty() ? ZoomAttendanceOccurrenceStudent::query()->whereIn('occurrence_id', $occurrences->pluck('id')) : null;
+        if ($codesQuery && ($filters['format'] ?? null) !== 'xlsx') $codesQuery->whereIn('student_id', $memberships->pluck('student_id'));
+        $codes = $codesQuery ? $codesQuery->get()->keyBy(fn ($row) => $row->occurrence_id.'|'.$row->student_id) : collect();
         $meetingColumns = $occurrences->map(fn ($occurrence) => [
             'id' => $occurrence->id, 'uuid' => $occurrence->meeting_uuid, 'meeting' => $occurrence->session?->title,
             'started_at' => $occurrence->started_at, 'duration_seconds' => $occurrence->duration_seconds,
             'participants_detected' => $occurrence->participants_detected, 'synced_at' => $occurrence->synced_at,
-            'sync_status' => $occurrence->sync_status, 'summary' => $this->summaryFor($occurrence->id, $codes),
+            'sync_status' => $occurrence->sync_status, 'summary' => $this->summaryFor($occurrence->id, $codeSummaries),
         ])->values();
         $rows = $memberships->map(function (ZoomBatchMembership $membership) use ($occurrences, $codes, $batch): array {
             $student = $membership->student;
@@ -72,14 +89,15 @@ class AdminBatchAttendanceController extends Controller
             return $exporter->download('batch-meeting-attendance.xlsx', 'Batch Meeting Attendance', $columns, $rows, ['Batch' => $batch->name], $summary);
         }
 
+        $pageRows = new LengthAwarePaginator($rows, $membershipTotal, 25, $page, ['path' => $request->url(), 'query' => $request->query()]);
         return response()->json(['batches' => $batches, 'batch' => $batch ? ['id' => $batch->id, 'name' => $batch->name] : null,
-            'occurrences' => $meetingColumns, 'rows' => $rows, 'settings' => $settings]);
+            'occurrences' => $meetingColumns, 'rows' => $pageRows, 'settings' => $settings]);
     }
 
     private function summaryFor(int $occurrenceId, $codes): array
     {
         $summary = ['O' => 0, 'X' => 0, 'L' => 0, 'M' => 0, 'Review' => 0];
-        foreach ($codes as $row) if ((int) $row->occurrence_id === $occurrenceId && isset($summary[$row->attendance_code])) $summary[$row->attendance_code]++;
+        foreach ($codes->get($occurrenceId, collect()) as $row) if (isset($summary[$row->attendance_code])) $summary[$row->attendance_code] = (int) $row->amount;
         return $summary;
     }
 

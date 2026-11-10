@@ -58,16 +58,22 @@ it('filters persisted realizations by student, category, lesson, and submitted d
     $lesson = realizationLesson($category, 'Reflection lesson');
     $otherLesson = realizationLesson($otherCategory, 'Other lesson');
     $match = StudentRealization::create(['student_id' => $student->id, 'lesson_id' => $lesson->id, 'realization' => 'I practiced the key idea.', 'submitted_at' => now()->startOfDay()->addHours(10)]);
+    StudentRealization::create(['student_id' => $student->id, 'lesson_id' => $lesson->id, 'realization' => 'I applied it again.', 'submitted_at' => now()->startOfDay()->addHours(9)]);
+    StudentRealization::create(['student_id' => $student->id, 'lesson_id' => $otherLesson->id, 'realization' => 'A second lesson response.', 'submitted_at' => now()->subDay()]);
     StudentRealization::create(['student_id' => $otherStudent->id, 'lesson_id' => $otherLesson->id, 'realization' => 'A different response.', 'submitted_at' => now()->subDays(5)]);
 
     $response = $this->actingAs($admin)->getJson('/api/admin/realizations?student='.$student->pseudocode.'&category_id='.$category->id.'&lesson_id='.$lesson->id.'&date_from='.now()->toDateString().'&date_to='.now()->toDateString())
         ->assertOk()->assertJsonCount(1, 'realizations.data')
-        ->assertJsonPath('realizations.data.0.id', $match->id)
+        ->assertJsonPath('realizations.data.0.student_id', $student->id)
         ->assertJsonPath('realizations.data.0.student_name', $student->name)
         ->assertJsonPath('realizations.data.0.pseudocode', $student->pseudocode)
-        ->assertJsonPath('realizations.data.0.category_name', $category->name)
-        ->assertJsonPath('realizations.data.0.lesson_title', $lesson->title)
-        ->assertJsonPath('realizations.data.0.realization', 'I practiced the key idea.');
+        ->assertJsonPath('realizations.data.0.realization_count', 3)
+        ->assertJsonPath('realizations.data.0.realizations.0.id', $match->id)
+        ->assertJsonPath('realizations.data.0.realizations.0.category_name', $category->name)
+        ->assertJsonPath('realizations.data.0.realizations.0.lesson_title', $lesson->title)
+        ->assertJsonPath('realizations.data.0.realizations.0.realization', 'I practiced the key idea.')
+        ->assertJsonPath('realizations.data.0.realizations.1.realization', 'I applied it again.')
+        ->assertJsonPath('realizations.data.0.realizations.2.realization', 'A second lesson response.');
     expect($response->json('realizations.per_page'))->toBe(25);
 });
 
@@ -80,8 +86,9 @@ it('paginates realization results and retains history when a lesson is archived'
     $lesson->delete();
 
     $this->actingAs($admin)->getJson('/api/admin/realizations')->assertOk()
-        ->assertJsonCount(1, 'realizations.data')->assertJsonPath('realizations.data.0.id', $record->id)
-        ->assertJsonPath('realizations.data.0.lesson_title', $lesson->title);
+        ->assertJsonCount(1, 'realizations.data')->assertJsonPath('realizations.data.0.student_id', $student->id)
+        ->assertJsonPath('realizations.data.0.realizations.0.id', $record->id)
+        ->assertJsonPath('realizations.data.0.realizations.0.lesson_title', $lesson->title);
     expect(StudentRealization::find($record->id))->not->toBeNull();
 });
 

@@ -45,7 +45,7 @@ class AdminStudentController extends Controller
                 $query->where('pace_group', $filters['pace_group']);
         }
 
-        $students = $query->orderByDesc('created_at')->orderByDesc('id')->paginate(20)->withQueryString();
+        $students = $query->orderByDesc('created_at')->orderByDesc('id')->paginate(25)->withQueryString();
         $studentIds = $students->getCollection()->modelKeys();
         $currentCategoryIds = $students->getCollection()->map(fn (User $student) => $student->categoryProgress->first()?->category_id)
             ->filter()->unique()->values();
@@ -110,6 +110,8 @@ class AdminStudentController extends Controller
                         'is_completed' => (bool) $lessonProgress?->is_completed,
                         'progress_percentage' => (float) ($lessonProgress?->progress_percentage ?? 0),
                         'last_watched_at' => $lessonProgress?->last_watched_at,
+                        'started_at' => $lessonProgress?->started_at,
+                        'completed_at' => $lessonProgress?->completed_at,
                     ];
                 });
                 $completed = $lessons->where('is_completed', true)->count();

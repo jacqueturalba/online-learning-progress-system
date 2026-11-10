@@ -24,7 +24,7 @@ type AdminDashboard = {
   total_lessons: number;
   completed_lessons: number;
   transfer_eligible_students: number;
-  students_by_category: { id: number; name: string; is_active: boolean; is_archived: boolean; students_count: number }[];
+  students_by_category: { data: { id: number; name: string; is_active: boolean; is_archived: boolean; students_count: number }[]; current_page: number; last_page: number; total: number };
   recent_activity: { student_name: string; lesson_title: string; category_name: string | null; last_watched_at: string; is_completed: boolean }[];
 };
 type AdminSection = 'dashboard' | 'students' | 'categories' | 'lessons' | 'zoom' | 'progress' | 'realizations' | 'reports' | 'settings';
@@ -54,6 +54,12 @@ const adminSection = ref<AdminSection>(getAdminSection());
 const lessonView = ref<'grid' | 'list'>('grid');
 const activeAdminPage = computed(() => adminNavigation.find(item => item.section === adminSection.value) ?? adminNavigation[0]);
 const adminDashboard = ref<AdminDashboard | null>(null), dashboardLoading = ref(false), dashboardError = ref('');
+async function loadDashboard(categoryPage = 1) {
+  dashboardLoading.value = true; dashboardError.value = '';
+  try { adminDashboard.value = await api(`/api/admin/dashboard?page=${categoryPage}`); }
+  catch (e) { dashboardError.value = (e as Error).message; }
+  finally { dashboardLoading.value = false; }
+}
 const resetToken = ref(location.pathname.startsWith('/reset-password/') ? decodeURIComponent(location.pathname.split('/').pop() || '') : '');
 const resetEmail = ref(new URLSearchParams(location.search).get('email') || '');
 const totalLessons = computed(() => categories.value.reduce((n, c) => n + c.total_lessons, 0));
@@ -119,15 +125,7 @@ async function load() {
             if (location.pathname === '/') history.replaceState({}, '', '/admin/dashboard');
             adminSection.value = getAdminSection();
             if (adminSection.value === 'dashboard') {
-                dashboardLoading.value = true;
-                dashboardError.value = '';
-                try {
-                    adminDashboard.value = await api('/api/admin/dashboard');
-                } catch (e) {
-                    dashboardError.value = (e as Error).message;
-                } finally {
-                    dashboardLoading.value = false;
-                }
+                await loadDashboard();
             }
         }
     } catch {
@@ -379,7 +377,7 @@ onMounted(() => {
       </aside>
     <div v-if="navOpen" class="backdrop" @click="navOpen = false"></div>
     <section class="main-area"><header class="topbar"><button class="icon-button mobile-menu" @click="navOpen = !navOpen"><Menu :size="20" /></button><span class="crumb"><span v-if="['admin','super_admin'].includes(user.role)">Administration</span><span v-else>Your space</span><ChevronRight :size="14" /> <b>{{ ['admin','super_admin'].includes(user.role) ? activeAdminPage.label : studentPage === 'profile' ? 'Profile' : studentPage === 'zoom' ? 'My Zoom' : 'Home' }}</b></span><button class="profile-chip" @click="signOut"><span class="avatar small">{{ user.name.charAt(0).toUpperCase() }}</span><span>{{ user.name.split(' ')[0] }}</span><LogOut :size="15" /></button></header>
-      <div v-if="['admin','super_admin'].includes(user.role)" class="content admin-content"><div class="welcome"><div><p class="eyebrow">ADMIN WORKSPACE</p><h1>{{ activeAdminPage.section === 'dashboard' ? 'Welcome, ' + user.name.split(' ')[0] + '.' : activeAdminPage.label }}</h1><p class="muted">{{ activeAdminPage.description }}</p></div></div><AdminDashboard v-if="activeAdminPage.section === 'dashboard'" :dashboard="adminDashboard" :loading="dashboardLoading" :error="dashboardError" /><AdminStudents v-else-if="activeAdminPage.section === 'students'" /><AdminCategories v-else-if="activeAdminPage.section === 'categories'" /><AdminLessons v-else-if="activeAdminPage.section === 'lessons'" /><AdminZoom v-else-if="activeAdminPage.section === 'zoom'" :can-manage-integration="user.role === 'super_admin'" /><AdminProgress v-else-if="activeAdminPage.section === 'progress'" /><AdminRealizations v-else-if="activeAdminPage.section === 'realizations'" /><AdminReports v-else-if="activeAdminPage.section === 'reports'" /><AdminBranding v-else /></div><div v-else class="content"><template v-if="studentPage === 'home'"><div class="welcome"><div><p class="eyebrow">{{ new Date().toLocaleDateString('en', { weekday: 'long', month: 'long', day: 'numeric' }).toUpperCase() }}</p><h1>Good day, {{ user.name.split(' ')[0] }}<span class="wave">&#33;</span></h1><p class="muted">Every lesson brings you a little further.</p></div><div class="streak"><span class="streak-icon">{{ completeLessons }}</span><div><b>{{ completeLessons }} <small>of {{ totalLessons }} lessons</small></b><span>completed so far</span></div></div></div>
+      <div v-if="['admin','super_admin'].includes(user.role)" class="content admin-content"><div class="welcome"><div><p class="eyebrow">ADMIN WORKSPACE</p><h1>{{ activeAdminPage.section === 'dashboard' ? 'Welcome, ' + user.name.split(' ')[0] + '.' : activeAdminPage.label }}</h1><p class="muted">{{ activeAdminPage.description }}</p></div></div><AdminDashboard v-if="activeAdminPage.section === 'dashboard'" :dashboard="adminDashboard" :loading="dashboardLoading" :error="dashboardError" @category-page-change="loadDashboard" /><AdminStudents v-else-if="activeAdminPage.section === 'students'" /><AdminCategories v-else-if="activeAdminPage.section === 'categories'" /><AdminLessons v-else-if="activeAdminPage.section === 'lessons'" /><AdminZoom v-else-if="activeAdminPage.section === 'zoom'" :can-manage-integration="user.role === 'super_admin'" /><AdminProgress v-else-if="activeAdminPage.section === 'progress'" /><AdminRealizations v-else-if="activeAdminPage.section === 'realizations'" /><AdminReports v-else-if="activeAdminPage.section === 'reports'" /><AdminBranding v-else /></div><div v-else class="content"><template v-if="studentPage === 'home'"><div class="welcome"><div><p class="eyebrow">{{ new Date().toLocaleDateString('en', { weekday: 'long', month: 'long', day: 'numeric' }).toUpperCase() }}</p><h1>Good day, {{ user.name.split(' ')[0] }}<span class="wave">&#33;</span></h1><p class="muted">Every lesson brings you a little further.</p></div><div class="streak"><span class="streak-icon">{{ completeLessons }}</span><div><b>{{ completeLessons }} <small>of {{ totalLessons }} lessons</small></b><span>completed so far</span></div></div></div>
         <div v-if="enrollment.eligible && enrollment.status === 'needs_revision'" class="enrollment-notice enrollment-revision" role="alert"><FileText :size="21"/><div><b>Your enrollment form requires revisions</b><span>Please review and update the requested information, then resubmit your form.</span><blockquote v-if="enrollment.revision_reason"><strong>Admin instructions</strong><span>{{ enrollment.revision_reason }}</span></blockquote></div><button class="primary" @click="openEnrollmentForm">Edit Enrollment Form</button></div><div v-else-if="enrollment.eligible && enrollment.status !== 'approved'" class="enrollment-notice" role="status"><FileText :size="20"/><div><b>Official Enrollment Form is ready</b><span>{{ enrollment.status === 'not_started' ? 'Please complete and submit your enrollment information.' : 'Status: ' + enrollment.status.replace('_',' ') }}</span></div><button class="primary" @click="studentPage = 'profile'">{{ enrollment.status === 'not_started' ? 'Complete form' : 'Open form' }}</button></div><div v-if="enrollment.requirement_enabled && !enrollment.eligible && enrollment.status !== 'approved'" class="enrollment-notice enrollment-locked" role="status"><FileText :size="20"/><div><b>Enrollment form unlocks after your lesson</b><span>Complete Lesson {{ enrollment.lesson_number }} in {{ enrollment.category_name || 'the required category' }} to access the Official Enrollment Form.</span></div></div><div class="hero" :style="branding.hero_image_url ? { backgroundImage: `linear-gradient(90deg,rgb(6, 43, 69, .97) 0%, rgb(6, 43, 69,.90) 50%, rgb(6, 43, 69,.18) 100%), url('${branding.hero_image_url}')` } : undefined">
           <div class="hero-copy"><span class="hero-tag"><CirclePlay :size="14" /> YOUR NEXT STEP</span><h2>{{ continueLesson ? 'Ready when you are.' : 'A journey well learned.' }}</h2><p>{{ continueLesson ? `Pick up ${continueLesson.title} and keep your momentum going.` : 'You’ve completed every published lesson. Nice work.' }}</p><button v-if="continueLesson" class="hero-button" @click="watchLesson(continueLesson, true)"><Play :size="15" fill="currentColor" /> Continue learning <span v-if="continueLesson.progress?.last_position_seconds">· Resume at {{ formatTime(continueLesson.progress.last_position_seconds) }}</span></button></div>
             <div v-if="!branding.hero_image_url" class="hero-art">

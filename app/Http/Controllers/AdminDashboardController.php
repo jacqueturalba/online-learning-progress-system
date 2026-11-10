@@ -33,8 +33,8 @@ class AdminDashboardController extends Controller
             'transfer_eligible_students' => StudentCategoryProgress::query()->whereNotNull('completed_at')
                 ->whereHas('category', fn ($query) => $query->where('is_active', true)->whereNull('deleted_at'))
                 ->distinct('student_id')->count('student_id'),
-            'students_by_category' => Category::withTrashed()->orderBy('sort_order')->orderBy('id')->get(['id', 'name', 'is_active', 'deleted_at'])
-                ->map(fn (Category $category) => [
+            'students_by_category' => Category::withTrashed()->orderBy('sort_order')->orderBy('id')->paginate(25)->withQueryString()
+                ->through(fn (Category $category) => [
                     'id' => $category->id,
                     'name' => $category->name,
                     'is_active' => $category->is_active,

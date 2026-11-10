@@ -55,7 +55,7 @@ class AdminProgressController extends Controller
                     ->orWhere('users.pseudocode', 'like', $term.'%'));
             })
             ->when($filters['pace_group'] ?? null, fn ($query, $pace) => $query->where('users.pace_group', $pace))
-            ->select(['users.id', 'users.name', 'users.pseudocode', 'users.pace_group', 'pace_groups.weekly_target'])
+            ->select(['users.id', 'users.name', 'users.email', 'users.pseudocode', 'users.pace_group', 'pace_groups.weekly_target'])
             ->selectRaw('COALESCE(learning_summary.lessons_started, 0) as lessons_started')
             ->selectRaw('COALESCE(learning_summary.lessons_completed, 0) as lessons_completed')
             ->selectRaw("CASE WHEN learning_summary.student_id IS NULL THEN active_batch_membership.zoom_batch_id ELSE learning_summary.batch_id END as batch_id")
@@ -69,15 +69,49 @@ class AdminProgressController extends Controller
             ->orderBy('users.name')->orderBy('users.id')->orderBy('learning_summary.batch_id');
 
         if (($filters['format'] ?? null) === 'xlsx') {
-            $all = $students->get()->map(fn (User $student) => $this->studentRow($student));
-            return app(ReportXlsxExporter::class)->download('student-progress.xlsx', 'Student Progress', [
-                ['key' => 'batch_name', 'label' => 'Batch'], ['key' => 'batch_id', 'label' => 'Batch ID', 'type' => 'number'],
-                ['key' => 'name', 'label' => 'Student'], ['key' => 'pseudocode', 'label' => 'Pseudocode'],
-                ['key' => 'pace_group', 'label' => 'Pace group'], ['key' => 'lessons_started', 'label' => 'Started', 'type' => 'number'],
-                ['key' => 'lessons_completed', 'label' => 'Completed', 'type' => 'number'], ['key' => 'completion_percentage', 'label' => 'Completion percent', 'type' => 'number'],
-                ['key' => 'current_lesson', 'label' => 'Current lesson'], ['key' => 'current_category', 'label' => 'Current category'],
-                ['key' => 'transfer_eligible', 'label' => 'Transfer eligible'],
-            ], $all, ['Student' => $filters['student'] ?? 'All', 'Batch ID' => $filters['batch_id'] ?? 'All', 'Category ID' => $filters['category_id'] ?? 'All', 'Lesson ID' => $filters['lesson_id'] ?? 'All', 'Pace group' => $filters['pace_group'] ?? 'All', 'From' => $filters['date_from'] ?? 'All', 'To' => $filters['date_to'] ?? 'All']);
+            $studentsForExport = $students->get();
+            $studentIds = $studentsForExport->pluck('id')->unique()->values();
+            $lessons = Lesson::withTrashed()->with('category:id,name')
+                ->where(fn ($query) => $query->where('is_published', true)->orWhereHas('progress', fn ($progress) => $progress->whereIn('student_id', $studentIds)))
+                ->orderBy('category_id')->orderBy('sort_order')->orderBy('id')->get(['id', 'category_id', 'title']);
+            $lessonIds = $lessons->pluck('id');
+            $progressByKey = DB::table('student_lesson_progress')->whereIn('student_id', $studentIds)->whereIn('lesson_id', $lessonIds)
+                ->get(['student_id', 'lesson_id', 'is_completed', 'progress_percentage', 'started_at', 'completed_at', 'last_watched_at'])
+                ->keyBy(fn ($progress) => $progress->student_id.':'.$progress->lesson_id);
+            $columns = [
+                ['key' => 'student_id', 'label' => 'Student ID', 'type' => 'number', 'width' => 12],
+                ['key' => 'name', 'label' => 'Student', 'width' => 26], ['key' => 'email', 'label' => 'Email', 'width' => 30],
+                ['key' => 'pseudocode', 'label' => 'Pseudocode', 'width' => 20], ['key' => 'batch_name', 'label' => 'Batch', 'width' => 22],
+                ['key' => 'batch_id', 'label' => 'Batch ID', 'type' => 'number', 'width' => 12],
+                ['key' => 'pace_group', 'label' => 'Pace group', 'width' => 14], ['key' => 'lessons_started', 'label' => 'Started', 'type' => 'number', 'width' => 11],
+                ['key' => 'lessons_completed', 'label' => 'Completed', 'type' => 'number', 'width' => 12],
+                ['key' => 'completion_percentage', 'label' => 'Completion percent', 'type' => 'number', 'width' => 18],
+                ['key' => 'current_lesson', 'label' => 'Current lesson', 'width' => 25], ['key' => 'current_category', 'label' => 'Current category', 'width' => 22],
+                ['key' => 'transfer_eligible', 'label' => 'Transfer eligible', 'width' => 18],
+            ];
+            foreach ($lessons as $lesson) {
+                $columns[] = ['key' => 'lesson_'.$lesson->id.'_status', 'label' => 'Status', 'group' => $lesson->title, 'width' => 22];
+                $columns[] = ['key' => 'lesson_'.$lesson->id.'_date', 'label' => 'Date Completed/Started', 'group' => $lesson->title, 'type' => 'datetime_readable', 'width' => 25];
+            }
+            $exportRows = $studentsForExport->map(function (User $student) use ($lessons, $progressByKey): array {
+                $summaryRow = $this->studentRow($student);
+                $row = ['student_id' => $student->id, 'name' => $student->name, 'email' => $student->email,
+                    'pseudocode' => $student->pseudocode, 'batch_name' => $student->batch_name, 'batch_id' => $student->batch_id,
+                    'pace_group' => $student->pace_group, 'lessons_started' => $summaryRow['lessons_started'],
+                    'lessons_completed' => $summaryRow['lessons_completed'], 'completion_percentage' => $summaryRow['completion_percentage'],
+                    'current_lesson' => $student->current_lesson, 'current_category' => $student->current_category,
+                    'transfer_eligible' => $summaryRow['transfer_eligible'] ? 'Eligible' : 'Not eligible'];
+                foreach ($lessons as $lesson) {
+                    $progress = $progressByKey->get($student->id.':'.$lesson->id);
+                    $completed = (bool) ($progress?->is_completed ?? false);
+                    $percentage = (float) ($progress?->progress_percentage ?? 0);
+                    $row['lesson_'.$lesson->id.'_status'] = $completed ? 'Complete' : ($percentage > 0 ? rtrim(rtrim(number_format($percentage, 1), '0'), '.').'% watched' : 'Not completed');
+                    $row['lesson_'.$lesson->id.'_date'] = $completed ? ($progress?->completed_at ?: $progress?->last_watched_at) : ($progress?->started_at ?: $progress?->last_watched_at);
+                }
+                return $row;
+            });
+            return app(ReportXlsxExporter::class)->download('student-progress.xlsx', 'Student Progress', $columns,
+                $exportRows, ['Student' => $filters['student'] ?? 'All', 'Batch ID' => $filters['batch_id'] ?? 'All', 'Category ID' => $filters['category_id'] ?? 'All', 'Lesson ID' => $filters['lesson_id'] ?? 'All', 'Pace group' => $filters['pace_group'] ?? 'All', 'From' => $filters['date_from'] ?? 'All', 'To' => $filters['date_to'] ?? 'All']);
         }
 
         $students = $students->paginate(25)->withQueryString();
