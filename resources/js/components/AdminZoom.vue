@@ -91,7 +91,7 @@ onMounted(() => { void load(); });
 
 <template>
   <div class="admin-zoom-page">
-    <details v-if="canManageIntegration" class="zoom-settings-panel zoom-section-collapse" open>
+    <details v-if="canManageIntegration" class="zoom-settings-panel zoom-section-collapse">
       <summary><strong>Zoom integration</strong><span>Credentials, connection checks, and integration controls</span></summary>
       <div class="category-editor-heading"><div><p class="eyebrow">ZOOM INTEGRATION</p><h2>Zoom settings</h2></div><span class="category-state" :class="credentialsConfigured ? 'available' : 'unavailable'">{{ credentialsConfigured ? 'Configured' : 'Not configured' }}</span></div>
       <p class="zoom-settings-copy">Add the Zoom Server-to-Server OAuth account credentials. Values are encrypted on the server and are never returned to this page. Leave fields blank when updating to keep their current values.</p>
