@@ -384,17 +384,43 @@ it('stores lesson videos privately and serves authorized byte ranges without cha
 
     $this->actingAs($student)->putJson("/api/lessons/{$lessonId}/progress", ['position_seconds' => 0, 'is_playing' => false])->assertOk();
     $payload = $this->actingAs($student)->getJson('/api/learning')->assertOk();
-    expect($payload->json('categories.0.lessons.0.video_stream_url'))->toBe(route('lessons.video', $lesson));
+    expect($payload->json('categories.0.lessons.0.video_stream_url'))->toBeNull();
     expect($payload->json('categories.0.lessons.0.video_path'))->toBeNull();
+    $playback = $this->actingAs($student)->postJson("/api/lessons/{$lessonId}/playback-session")->assertOk()->json();
+    $videoUrl = $playback['video_url'];
+    $playbackToken = $playback['playback_token'];
+    expect($playback['expires_at'])->toBeGreaterThan(now()->addMinutes(119)->getTimestamp() * 1000);
 
-    $rangeResponse = $this->actingAs($student)->withHeader('Range', 'bytes=0-3')->get(route('lessons.video', $lesson));
+    $this->actingAs($student)->get($videoUrl)->assertForbidden();
+    $this->actingAs($student)->withHeader('Referer', 'https://attacker.example/embed')->get($videoUrl)->assertForbidden();
+    $this->actingAs($student)->withHeaders(['Origin' => 'https://attacker.example', 'Referer' => url('/')])->get($videoUrl)->assertForbidden();
+    $rangeResponse = $this->actingAs($student)->withHeaders(['Range' => 'bytes=0-3', 'Origin' => url('/'), 'Referer' => url('/')])->get($videoUrl);
+    $rangeResponse->assertStatus(206);
     expect($rangeResponse->headers->get('Content-Range'))->toBe('bytes 0-3/10240');
     $rangeResponse->assertStatus(206)->assertHeader('Accept-Ranges', 'bytes');
-    $this->actingAs($otherStudent)->get(route('lessons.video', $lesson))->assertStatus(206);
-    $this->actingAs($admin)->get(route('lessons.video', $lesson))->assertForbidden();
+    $this->actingAs($otherStudent)->withHeader('Referer', url('/'))->get($videoUrl)->assertForbidden();
+    $this->actingAs($student)->withHeaders(['Range' => 'bytes=bad', 'Origin' => url('/'), 'Referer' => url('/')])->get($videoUrl)->assertStatus(416);
+    $this->travel(60)->minutes();
+    $this->actingAs($student)->withHeaders(['Range' => 'bytes=4-7', 'Origin' => url('/'), 'Referer' => url('/')])->get($videoUrl)->assertStatus(206)->assertHeader('Content-Range', 'bytes 4-7/10240');
+    $this->travelBack();
+    $this->travel(1)->minutes();
+    $renewed = $this->actingAs($student)->postJson("/api/lessons/{$lessonId}/playback-session/renew", ['playback_token' => $playbackToken])->assertOk()->json();
+    $this->travelBack();
+    expect($renewed['video_url'])->toBe($videoUrl)->and($renewed['expires_at'])->toBeGreaterThan($playback['expires_at']);
+    $this->actingAs($student)->withHeaders(['Range' => 'bytes=4-7', 'Origin' => url('/'), 'Referer' => url('/')])->get($videoUrl)->assertStatus(206)->assertHeader('Content-Range', 'bytes 4-7/10240');
+    $this->actingAs($student)->postJson("/api/lessons/{$lessonId}/playback-session/revoke", ['playback_token' => $playbackToken])->assertOk();
+    $this->actingAs($student)->get($videoUrl)->assertForbidden();
+    $this->actingAs($student)->postJson("/api/lessons/{$lessonId}/playback-session/renew", ['playback_token' => $playbackToken])->assertForbidden();
+    $expiredPlayback = $this->actingAs($student)->postJson("/api/lessons/{$lessonId}/playback-session")->assertOk()->json();
+    $this->travel(config('video.playback_session_minutes') + 1)->minutes();
+    $this->actingAs($student)->get($expiredPlayback['video_url'])->assertForbidden();
+    $this->actingAs($student)->postJson("/api/lessons/{$lessonId}/playback-session/renew", ['playback_token' => $expiredPlayback['playback_token']])->assertForbidden();
+    $this->travelBack();
+    $this->actingAs($student)->get(route('lessons.video', $lesson))->assertForbidden();
+    $this->actingAs($admin)->get($videoUrl)->assertForbidden();
     $unpublishedPath = fakeVideo('unpublished.mp4')->store('lesson-videos', 'local');
     $unpublishedLesson = Lesson::create(['category_id' => $category->id, 'title' => 'Not available', 'video_path' => $unpublishedPath, 'duration_seconds' => 100, 'sort_order' => 2, 'is_published' => false]);
-    $this->actingAs($otherStudent)->get(route('lessons.video', $unpublishedLesson))->assertNotFound();
+    $this->actingAs($otherStudent)->get(route('lessons.video', $unpublishedLesson))->assertForbidden();
     $this->app['auth']->guard()->logout();
     $this->get(route('lessons.video', $lesson))->assertRedirect('/');
 
@@ -428,7 +454,7 @@ it('unlocks lessons in curriculum order only after verified completion and a sav
         ->assertJsonPath('categories.0.lessons.0.is_unlocked', true)
         ->assertJsonPath('categories.1.lessons.0.is_unlocked', false)
         ->assertJsonPath('categories.1.lessons.0.video_stream_url', null);
-    $this->get(route('lessons.video', $introLesson))->assertNotFound();
+    $this->get(route('lessons.video', $introLesson, false))->assertForbidden();
     $this->putJson("/api/lessons/{$introLesson->id}/progress", ['position_seconds' => 10, 'is_playing' => false])->assertNotFound();
     $this->postJson("/api/lessons/{$introLesson->id}/realizations", ['realization' => 'Too early'])->assertNotFound();
 
@@ -439,8 +465,45 @@ it('unlocks lessons in curriculum order only after verified completion and a sav
     StudentCategoryProgress::create(['student_id' => $student->id, 'category_id' => $basic->id, 'started_at' => now(), 'completed_at' => now()]);
     $learning = $this->getJson('/api/learning')->assertOk();
     expect($learning->json('categories.1.lessons.0.is_unlocked'))->toBeTrue();
-    expect($learning->json('categories.1.lessons.0.video_stream_url'))->toBe(route('lessons.video', $introLesson));
-    $this->get(route('lessons.video', $introLesson))->assertOk();
+    $introPlayback = $this->postJson("/api/lessons/{$introLesson->id}/playback-session")->assertOk()->json();
+    $this->withHeader('Referer', url('/'))->get($introPlayback['video_url'])->assertOk();
+});
+
+it('keeps a completed lesson playable and preserves its progress and realization when replayed', function () {
+    Storage::fake('local');
+    $student = makeStudent();
+    $category = makeCategory();
+    $lesson = makeLesson($category, 'Completed replay');
+    $lesson->update(['video_path' => fakeVideo('completed-replay.mp4')->store('lesson-videos', 'local')]);
+    $completedAt = now()->subMinutes(5);
+    StudentLessonProgress::create([
+        'student_id' => $student->id,
+        'lesson_id' => $lesson->id,
+        'last_position_seconds' => 100,
+        'watched_seconds' => 100,
+        'progress_percentage' => 100,
+        'started_at' => $completedAt->copy()->subHour(),
+        'last_watched_at' => $completedAt,
+        'is_playing' => false,
+        'is_completed' => true,
+        'completed_at' => $completedAt,
+    ]);
+    StudentRealization::create(['student_id' => $student->id, 'lesson_id' => $lesson->id, 'realization' => 'I completed this lesson.', 'submitted_at' => $completedAt]);
+
+    $this->actingAs($student)->getJson('/api/learning')->assertOk()
+        ->assertJsonPath('categories.0.lessons.0.is_unlocked', true)
+        ->assertJsonPath('categories.0.lessons.0.has_video', true)
+        ->assertJsonPath('categories.0.lessons.0.progress.is_completed', true);
+    $playback = $this->postJson("/api/lessons/{$lesson->id}/playback-session")->assertOk()->json();
+    $this->withHeaders(['Referer' => url('/'), 'Range' => 'bytes=0-3'])->get($playback['video_url'])
+        ->assertStatus(206)->assertHeader('Content-Range', 'bytes 0-3/10240');
+
+    $this->putJson("/api/lessons/{$lesson->id}/progress", ['position_seconds' => 0, 'is_playing' => false])->assertOk()
+        ->assertJsonPath('progress.is_completed', true)
+        ->assertJsonPath('progress.watched_seconds', 100);
+    expect(StudentLessonProgress::where('student_id', $student->id)->where('lesson_id', $lesson->id)->count())->toBe(1)
+        ->and(StudentRealization::where('student_id', $student->id)->where('lesson_id', $lesson->id)->count())->toBe(1)
+        ->and(StudentLessonProgress::where('student_id', $student->id)->where('lesson_id', $lesson->id)->first()->completed_at->toDateTimeString())->toBe($completedAt->toDateTimeString());
 });
 
 it('enforces category access settings for first lesson, sequential lessons, and unlock all through protected endpoints', function () {

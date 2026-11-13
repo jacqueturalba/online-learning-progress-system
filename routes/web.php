@@ -22,9 +22,12 @@ Route::post('/forgot-password', [AuthController::class, 'forgotPassword'])->midd
 Route::post('/reset-password', [AuthController::class, 'resetPassword'])->middleware(['guest', 'throttle:5,1']);
 Route::get('/api/learning', [LearningController::class, 'index'])->middleware(['auth', 'role:student']);
 Route::get('/api/my-zoom', [LearningController::class, 'myZoom'])->middleware(['auth', 'role:student']);
-Route::get('/api/lessons/{lesson}/video', [LearningController::class, 'video'])->middleware(['auth', 'role:student'])->name('lessons.video');
+Route::post('/api/lessons/{lesson}/playback-session', [LearningController::class, 'startPlayback'])->middleware(['auth', 'role:student', 'throttle:30,1']);
+Route::post('/api/lessons/{lesson}/playback-session/renew', [LearningController::class, 'renewPlayback'])->middleware(['auth', 'role:student', 'throttle:30,1']);
+Route::post('/api/lessons/{lesson}/playback-session/revoke', [LearningController::class, 'revokePlayback'])->middleware(['auth', 'role:student', 'throttle:30,1']);
+Route::get('/api/lessons/{lesson}/video', [LearningController::class, 'video'])->middleware(['auth', 'role:student', 'throttle:120,1'])->name('lessons.video');
 Route::put('/api/lessons/{lesson}/progress', [LearningController::class, 'saveProgress'])->middleware(['auth', 'role:student', 'throttle:60,1']);
-Route::post('/api/lessons/{lesson}/realizations', [App\Http\Controllers\StudentRealizationController::class, 'store'])->middleware(['auth', 'role:student', 'throttle:10,1']);
+Route::post('/api/lessons/{lesson}/realizations', [App\Http\Controllers\StudentRealizationController::class, 'store'])->middleware(['auth', 'role:student', 'throttle:10,1,student-realizations:']);
 Route::prefix('/admin')->middleware(['auth', 'role:admin'])->group(function () {
     Route::get('/{section?}', fn () => view('app'))
         ->whereIn('section', ['dashboard', 'students', 'categories', 'lessons', 'zoom', 'progress', 'realizations', 'reports', 'settings'])
