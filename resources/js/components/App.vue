@@ -17,7 +17,7 @@ import PublicLanding from './PublicLanding.vue';
 type User = { id: number; name: string; email: string; role: 'admin' | 'super_admin' | 'student'; country?: string|null; address?: string|null; phone_country_code?: string|null; phone_number?: string|null };
 type Branding = { brand_name: string; brand_description: string; colors: { primary: string; secondary: string; accent: string; background: string; text: string }; logo_url: string | null; hero_image_url?: string; daily_verse_text?: string; daily_verse_reference?: string };
 type LessonProgress = { last_position_seconds: number; watched_seconds: number; progress_percentage: number; is_completed: boolean; last_watched_at: string | null };
-type Lesson = { id: number; title: string; description?: string; thumbnail_url?: string | null; video_stream_url?: string | null; duration_seconds?: number; sort_order: number; is_unlocked: boolean; realization_submitted: boolean; progress: LessonProgress | null };
+type Lesson = { id: number; title: string; description?: string; thumbnail_url?: string | null; video_stream_url?: string | null; has_video?: boolean; duration_seconds?: number; sort_order: number; is_unlocked: boolean; realization_submitted: boolean; progress: LessonProgress | null };
 type Category = { id: number; name: string; description?: string; thumbnail_url?: string | null; background_color?: string | null; total_lessons: number; completed_lessons: number; progress_percentage: number; lessons: Lesson[] };
 type AdminDashboard = {
   total_students: number;
@@ -110,6 +110,10 @@ type PlaybackUpdate = { lessonId: number; positionSeconds: number; isPlaying: bo
 let autoplayOnLoad = false;
 let playbackQueue: Promise<LessonProgress | null> = Promise.resolve(null);
 let lastReportedSecond = -1;
+let playbackToken: string | null = null;
+let playbackExpiresAt = 0;
+let playbackRenewalTimer: ReturnType<typeof setTimeout> | null = null;
+const playbackInitializing = ref(false);
 async function api(url: string, init: RequestInit = {}) {
   const res = await fetch(url, { credentials: 'same-origin', ...init, headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrf(), ...init.headers } });
   const body = await res.json().catch(() => ({})); if (!res.ok) throw new Error(body.message || Object.values(body.errors || {}).flat()[0] as string || 'Something went wrong.'); return body;
@@ -162,9 +166,16 @@ async function signOut() {
     adminSection.value = 'dashboard';
   }
 }
-function watchLesson(lesson: Lesson, autoplay = true) {
+async function watchLesson(lesson: Lesson, autoplay = true) {
   if (!lesson.is_unlocked) return;
-  selected.value = lesson;
+  const priorSession = playbackToken;
+  const priorLessonId = selected.value?.id;
+  clearPlaybackRenewal();
+  playbackToken = null;
+  playbackExpiresAt = 0;
+  if (priorSession && priorLessonId) void api(`/api/lessons/${priorLessonId}/playback-session/revoke`, { method: 'POST', body: JSON.stringify({ playback_token: priorSession }) }).catch(() => undefined);
+  selected.value = { ...lesson, video_stream_url: null };
+  playbackInitializing.value = false;
   realizationText.value = ''; realizationNotice.value = ''; realizationError.value = '';
   navigationNotice.value = '';
   autoplayOnLoad = autoplay;
@@ -172,9 +183,57 @@ function watchLesson(lesson: Lesson, autoplay = true) {
   replayRequired.value = false;
   playbackError.value = '';
   lastReportedSecond = lesson.progress?.last_position_seconds ?? -1;
+  if (!lesson.has_video) return;
+  playbackInitializing.value = true;
+  try {
+    const session = await api(`/api/lessons/${lesson.id}/playback-session`, { method: 'POST' });
+    if (selected.value?.id !== lesson.id) {
+      await api(`/api/lessons/${lesson.id}/playback-session/revoke`, { method: 'POST', body: JSON.stringify({ playback_token: session.playback_token }) }).catch(() => undefined);
+      return;
+    }
+    playbackToken = session.playback_token;
+    playbackExpiresAt = Date.now() + session.expires_in_seconds * 1000;
+    selected.value = { ...lesson, video_stream_url: session.video_url };
+    schedulePlaybackRenewal(lesson.id);
+  } catch (caught) {
+    playbackError.value = (caught as Error).message || 'The lesson video could not be authorized.';
+  } finally {
+    playbackInitializing.value = false;
+  }
+}
+function clearPlaybackRenewal() {
+  if (playbackRenewalTimer) clearTimeout(playbackRenewalTimer);
+  playbackRenewalTimer = null;
+}
+function schedulePlaybackRenewal(lessonId: number, retry = false) {
+  clearPlaybackRenewal();
+  const renewalLead = retry ? 30_000 : 5 * 60_000;
+  const delay = Math.max(1000, playbackExpiresAt - Date.now() - renewalLead);
+  playbackRenewalTimer = setTimeout(() => void renewPlaybackSession(lessonId), delay);
+}
+async function renewPlaybackSession(lessonId: number) {
+  const token = playbackToken;
+  if (!token || selected.value?.id !== lessonId) return;
+  try {
+    const result = await api(`/api/lessons/${lessonId}/playback-session/renew`, { method: 'POST', body: JSON.stringify({ playback_token: token }) });
+    if (selected.value?.id !== lessonId || playbackToken !== token) return;
+    playbackExpiresAt = Date.now() + result.expires_in_seconds * 1000;
+    playbackError.value = '';
+    schedulePlaybackRenewal(lessonId);
+  } catch (caught) {
+    if (Date.now() < playbackExpiresAt - 1000 && selected.value?.id === lessonId) {
+      playbackError.value = 'Video access renewal is retrying while playback continues.';
+      schedulePlaybackRenewal(lessonId, true);
+    } else {
+      playbackError.value = (caught as Error).message || 'Video access expired. Reopen the lesson to continue.';
+    }
+  }
+}
+function renewPlaybackWhenReturning() {
+  if (selected.value && playbackToken && playbackExpiresAt - Date.now() < 6 * 60_000) void renewPlaybackSession(selected.value.id);
 }
 async function submitRealization() {
-  if (!selected.value || realizationSaving.value) return;
+  if (!selected.value || selected.value.realization_submitted || realizationSaving.value) return;
   realizationSaving.value = true; realizationNotice.value = ''; realizationError.value = '';
   try {
     const lessonId = selected.value.id;
@@ -190,7 +249,7 @@ async function refreshStudentLearning(lessonId = selected.value?.id) {
   categories.value = response.categories;
   if (lessonId !== undefined) {
     const refreshed = response.categories.flatMap((category: Category) => category.lessons).find((lesson: Lesson) => lesson.id === lessonId);
-    if (refreshed && selected.value?.id === lessonId) selected.value = refreshed;
+    if (refreshed && selected.value?.id === lessonId) selected.value = { ...refreshed, video_stream_url: selected.value.video_stream_url };
   }
 }
 function lessonPage(category: Category) { return Math.min(lessonPages.value[category.id] ?? 0, lessonPageCount(category) - 1); }
@@ -225,7 +284,8 @@ async function syncPlayback(event: Event, lessonId: number, isPlaying: boolean, 
 async function resumePlayback(event: Event, lessonId: number) {
   const video = event.currentTarget as HTMLVideoElement;
   const lesson = selected.value?.id === lessonId ? selected.value : null;
-  if (lesson?.progress?.last_position_seconds) video.currentTime = lesson.progress.last_position_seconds;
+  if (lesson?.progress?.is_completed) video.currentTime = 0;
+  else if (lesson?.progress?.last_position_seconds) video.currentTime = lesson.progress.last_position_seconds;
   void syncPlayback(event, lessonId, false, true);
   if (autoplayOnLoad) {
     autoplayOnLoad = false;
@@ -281,11 +341,17 @@ async function closeLesson() {
   const video = document.querySelector<HTMLVideoElement>('.lesson-modal video');
   const lessonId = selected.value?.id;
   if (video && lessonId) void postPlaybackUpdate({ lessonId, positionSeconds: Math.floor(video.currentTime), isPlaying: false });
+  const token = playbackToken;
+  clearPlaybackRenewal();
+  playbackToken = null;
+  playbackExpiresAt = 0;
   selected.value = null;
+  if (lessonId && token) void api(`/api/lessons/${lessonId}/playback-session/revoke`, { method: 'POST', body: JSON.stringify({ playback_token: token }) }).catch(() => undefined);
 }
 onMounted(() => {
   void loadBranding();
   window.addEventListener('branding-updated', (event) => void loadBranding((event as CustomEvent<Branding>).detail));
+  document.addEventListener('visibilitychange', renewPlaybackWhenReturning);
   load();
   window.addEventListener('pagehide', () => {
     const video = document.querySelector<HTMLVideoElement>('.lesson-modal video');
@@ -355,12 +421,12 @@ onMounted(() => {
           <a href="#" class="nav-item" :class="{ active: studentPage === 'home' }" @click.prevent="studentPage = 'home'; navOpen = false">
             <House :size="18" />Home
           </a>
-          <a class="nav-item" href="#learning" @click="studentPage = 'home'">
+          <!-- <a class="nav-item" href="#learning" @click="studentPage = 'home'">
             <BookOpen :size="18" />My learning
           </a>
           <a class="nav-item" href="#progress" @click="studentPage = 'home'">
             <Check :size="18" />Progress
-          </a>
+          </a> -->
           <a href="#zoom" class="nav-item" :class="{ active: studentPage === 'zoom' }" @click.prevent="studentPage = 'zoom'; navOpen = false">
             <Video :size="18" />My Zoom
           </a>
@@ -382,7 +448,7 @@ onMounted(() => {
       </aside>
     <div v-if="navOpen" class="backdrop" @click="navOpen = false"></div>
     <section class="main-area"><header class="topbar"><button class="icon-button mobile-menu" @click="navOpen = !navOpen"><Menu :size="20" /></button><span class="crumb"><span v-if="['admin','super_admin'].includes(user.role)">Administration</span><span v-else>Your space</span><ChevronRight :size="14" /> <b>{{ ['admin','super_admin'].includes(user.role) ? activeAdminPage.label : studentPage === 'profile' ? 'Profile' : studentPage === 'zoom' ? 'My Zoom' : 'Home' }}</b></span><button class="profile-chip" @click="signOut"><span class="avatar small">{{ user.name.charAt(0).toUpperCase() }}</span><span>{{ user.name.split(' ')[0] }}</span><LogOut :size="15" /></button></header>
-      <div v-if="['admin','super_admin'].includes(user.role)" class="content admin-content"><div class="welcome"><div><p class="eyebrow">ADMIN WORKSPACE</p><h1>{{ activeAdminPage.section === 'dashboard' ? 'Welcome, ' + user.name.split(' ')[0] + '.' : activeAdminPage.label }}</h1><p class="muted">{{ activeAdminPage.description }}</p></div></div><AdminDashboard v-if="activeAdminPage.section === 'dashboard'" :dashboard="adminDashboard" :loading="dashboardLoading" :error="dashboardError" @category-page-change="loadDashboard" /><AdminStudents v-else-if="activeAdminPage.section === 'students'" /><AdminCategories v-else-if="activeAdminPage.section === 'categories'" /><AdminLessons v-else-if="activeAdminPage.section === 'lessons'" /><AdminZoom v-else-if="activeAdminPage.section === 'zoom'" :can-manage-integration="user.role === 'super_admin'" /><AdminProgress v-else-if="activeAdminPage.section === 'progress'" /><AdminRealizations v-else-if="activeAdminPage.section === 'realizations'" /><AdminReports v-else-if="activeAdminPage.section === 'reports'" /><AdminBranding v-else /></div><div v-else class="content"><template v-if="studentPage === 'home'"><div class="welcome"><div><p class="eyebrow">{{ new Date().toLocaleDateString('en', { weekday: 'long', month: 'long', day: 'numeric' }).toUpperCase() }}</p><h1>Good day, {{ user.name.split(' ')[0] }}<span class="wave">&#33;</span></h1><p class="muted">Every lesson brings you a little further.</p></div><div class="streak"><span class="streak-icon">{{ completeLessons }}</span><div><b>{{ completeLessons }} <small>of {{ totalLessons }} lessons</small></b><span>completed so far</span></div></div></div>
+      <div v-if="['admin','super_admin'].includes(user.role)" class="content admin-content"><div class="welcome"><div><p class="eyebrow">ADMIN WORKSPACE</p><h1>{{ activeAdminPage.section === 'dashboard' ? 'Welcome, ' + user.name.split(' ')[0] + '.' : activeAdminPage.label }}</h1><p class="muted">{{ activeAdminPage.description }}</p></div></div><AdminDashboard v-if="activeAdminPage.section === 'dashboard'" :dashboard="adminDashboard" :loading="dashboardLoading" :error="dashboardError" @category-page-change="loadDashboard" /><AdminStudents v-else-if="activeAdminPage.section === 'students'" /><AdminCategories v-else-if="activeAdminPage.section === 'categories'" /><AdminLessons v-else-if="activeAdminPage.section === 'lessons'" /><AdminZoom v-else-if="activeAdminPage.section === 'zoom'" :can-manage-integration="user.role === 'super_admin'" /><AdminProgress v-else-if="activeAdminPage.section === 'progress'" /><AdminRealizations v-else-if="activeAdminPage.section === 'realizations'" /><AdminReports v-else-if="activeAdminPage.section === 'reports'" /><AdminBranding v-else /></div><div v-else class="content"><template v-if="studentPage === 'home'"><div class="welcome"><div><p class="eyebrow">{{ new Date().toLocaleDateString('en', { weekday: 'long', month: 'long', day: 'numeric' }).toUpperCase() }}</p><h1>Good day, {{ user.name.split(' ')[0] }}<span class="wave">&#33;</span></h1><p class="muted">Every lesson brings you a little further.</p></div><div class="streak"><span class="streak-icon">{{ completeLessons }}</span><div><b><small>of {{ totalLessons }} lessons</small></b><span>completed so far</span></div></div></div>
         <div v-if="enrollment.eligible && enrollment.status === 'needs_revision'" class="enrollment-notice enrollment-revision" role="alert"><FileText :size="21"/><div><b>Your enrollment form requires revisions</b><span>Please review and update the requested information, then resubmit your form.</span><blockquote v-if="enrollment.revision_reason"><strong>Admin instructions</strong><span>{{ enrollment.revision_reason }}</span></blockquote></div><button class="primary" @click="openEnrollmentForm">Edit Enrollment Form</button></div><div v-else-if="enrollment.eligible && enrollment.status !== 'approved'" class="enrollment-notice" role="status"><FileText :size="20"/><div><b>Official Enrollment Form is ready</b><span>{{ enrollment.status === 'not_started' ? 'Please complete and submit your enrollment information.' : 'Status: ' + enrollment.status.replace('_',' ') }}</span></div><button class="primary" @click="studentPage = 'profile'">{{ enrollment.status === 'not_started' ? 'Complete form' : 'Open form' }}</button></div><div v-if="enrollment.requirement_enabled && !enrollment.eligible && enrollment.status !== 'approved'" class="enrollment-notice enrollment-locked" role="status"><FileText :size="20"/><div><b>Enrollment form unlocks after your lesson</b><span>Complete Lesson {{ enrollment.lesson_number }} in {{ enrollment.category_name || 'the required category' }} to access the Official Enrollment Form.</span></div></div><div class="hero" :style="branding.hero_image_url ? { backgroundImage: `linear-gradient(90deg,rgb(6, 43, 69, .97) 0%, rgb(6, 43, 69,.90) 50%, rgb(6, 43, 69,.18) 100%), url('${branding.hero_image_url}')` } : undefined">
           <div class="hero-copy"><span class="hero-tag"><CirclePlay :size="14" /> YOUR NEXT STEP</span><h2>{{ continueLesson ? 'Ready when you are.' : 'A journey well learned.' }}</h2><p>{{ continueLesson ? `Pick up ${continueLesson.title} and keep your momentum going.` : 'You’ve completed every published lesson. Nice work.' }}</p><button v-if="continueLesson" class="hero-button" @click="watchLesson(continueLesson, true)"><Play :size="15" fill="currentColor" /> Continue learning <span v-if="continueLesson.progress?.last_position_seconds">· Resume at {{ formatTime(continueLesson.progress.last_position_seconds) }}</span></button></div>
             <div v-if="!branding.hero_image_url" class="hero-art">
@@ -399,6 +465,6 @@ onMounted(() => {
         <StudentZoom v-else-if="studentPage === 'zoom'" /><StudentProfile v-else :user="user" :enrollment-eligible="enrollment.eligible" @enrollment-submitted="enrollment.status = $event; enrollment.revision_reason = null" />
       </div>
     </section>
-    <div v-if="selected" class="modal-backdrop" @click.self="closeLesson"><section class="lesson-modal"><button class="modal-close" aria-label="Close lesson" @click="closeLesson"><X :size="19" /></button><p class="eyebrow">LESSON</p><h2>{{ selected.title }}</h2><p class="muted">{{ selected.description || 'Take your time and enjoy this lesson.' }}</p><video v-if="selected.video_stream_url" class="video" controls controlsList="nodownload" playsinline :src="selected.video_stream_url" :data-lesson-id="selected.id" @contextmenu.prevent @loadedmetadata="resumePlayback($event, selected.id)" @play="handlePlay($event, selected.id)" @pause="handlePause($event, selected.id)" @timeupdate="handleTimeUpdate($event, selected.id)" @ended="handleEnded($event, selected.id)" /><div v-else class="video-placeholder"><CirclePlay :size="38" /><span>This lesson’s video hasn’t been added yet.</span></div><p v-if="playbackError" class="error playback-error" role="status">{{ playbackError }}</p><p v-if="navigationNotice" class="lesson-navigation-notice" role="status">{{ navigationNotice }}</p><button v-if="autoplayBlocked" class="primary continue-button" @click="continueAfterAutoplayBlock">Continue lesson <Play :size="16" fill="currentColor" /></button><button v-if="replayRequired" class="primary continue-button" @click="replayLesson">Replay lesson <Play :size="16" fill="currentColor" /></button><form class="student-realization-form" @submit.prevent="submitRealization"><label for="student-realization">What did you take away from this lesson?</label><textarea id="student-realization" v-model="realizationText" maxlength="20000" required minlength="3" rows="3" placeholder="Write a short reflection or describe what you practiced."></textarea><p v-if="realizationNotice" class="success" role="status">{{ realizationNotice }}</p><p v-if="realizationError" class="error" role="alert">{{ realizationError }}</p><button class="primary" :disabled="realizationSaving">{{ realizationSaving ? 'Saving…' : 'Save realization' }}</button></form><div class="modal-footer"><span><Clock3 :size="16" /> {{ formatTime(selected.duration_seconds) }}</span><span v-if="selected.progress?.is_completed" class="completed-pill"><Check :size="16" /> Lesson complete</span></div><div class="lesson-navigation"><button type="button" class="secondary-button" :disabled="!previousLesson" @click="previousLesson && watchLesson(previousLesson, false)">Previous Lesson</button><p v-if="nextLessonCandidate && !selected.progress?.is_completed" class="lesson-navigation-help">Watch at least 50% of this lesson to unlock the next lesson.</p><p v-else-if="nextLessonCandidate && !selected.realization_submitted" class="lesson-navigation-help">Submit your realization above before proceeding to the next lesson.</p><button type="button" class="primary" :disabled="!selected.progress?.is_completed || !selected.realization_submitted || !nextLesson" @click="nextLesson && watchLesson(nextLesson, false)">Next Lesson</button></div></section></div>
+    <div v-if="selected" class="modal-backdrop" @click.self="closeLesson"><section class="lesson-modal"><button class="modal-close" aria-label="Close lesson" @click="closeLesson"><X :size="19" /></button><p class="eyebrow">LESSON</p><h2>{{ selected.title }}</h2><p class="muted">{{ selected.description || 'Take your time and enjoy this lesson.' }}</p><div v-if="selected.video_stream_url" class="video-player-surface" @contextmenu.prevent><video class="video" controls controlsList="nodownload" disablePictureInPicture playsinline referrerpolicy="same-origin" :src="selected.video_stream_url" :data-lesson-id="selected.id" @contextmenu.prevent @loadedmetadata="resumePlayback($event, selected.id)" @play="handlePlay($event, selected.id)" @pause="handlePause($event, selected.id)" @timeupdate="handleTimeUpdate($event, selected.id)" @ended="handleEnded($event, selected.id)" /></div><div v-else class="video-placeholder"><CirclePlay :size="38" /><span>{{ selected.has_video ? (playbackInitializing ? 'Preparing your lesson video…' : 'Lesson video access is unavailable.') : 'This lesson’s video hasn’t been added yet.' }}</span></div><p v-if="playbackError" class="error playback-error" role="status">{{ playbackError }}</p><p v-if="navigationNotice" class="lesson-navigation-notice" role="status">{{ navigationNotice }}</p><button v-if="autoplayBlocked" class="primary continue-button" @click="continueAfterAutoplayBlock">Continue lesson <Play :size="16" fill="currentColor" /></button><button v-if="replayRequired" class="primary continue-button" @click="replayLesson">Replay lesson <Play :size="16" fill="currentColor" /></button><form v-if="!selected.realization_submitted" class="student-realization-form" @submit.prevent="submitRealization"><label for="student-realization">What did you take away from this lesson?</label><textarea id="student-realization" v-model="realizationText" maxlength="20000" required minlength="3" rows="3" placeholder="Write a short reflection or describe what you practiced."></textarea><p v-if="realizationNotice" class="success" role="status">{{ realizationNotice }}</p><p v-if="realizationError" class="error" role="alert">{{ realizationError }}</p><button class="primary" :disabled="realizationSaving">{{ realizationSaving ? 'Saving…' : 'Save realization' }}</button></form><p v-else class="success realization-saved" role="status">Your realization has been saved.</p><div class="modal-footer"><span><Clock3 :size="16" /> {{ formatTime(selected.duration_seconds) }}</span><span v-if="selected.progress?.is_completed" class="completed-pill"><Check :size="16" /> Lesson complete</span></div><div class="lesson-navigation"><button type="button" class="secondary-button" :disabled="!previousLesson" @click="previousLesson && watchLesson(previousLesson, false)">Previous Lesson</button><p v-if="nextLessonCandidate && !selected.progress?.is_completed" class="lesson-navigation-help">Watch at least 50% of this lesson to unlock the next lesson.</p><p v-else-if="nextLessonCandidate && !selected.realization_submitted" class="lesson-navigation-help">Submit your realization above before proceeding to the next lesson.</p><button type="button" class="primary" :disabled="!selected.progress?.is_completed || !selected.realization_submitted || !nextLesson" @click="nextLesson && watchLesson(nextLesson, false)">Next Lesson</button></div></section></div>
   </div>
 </template>

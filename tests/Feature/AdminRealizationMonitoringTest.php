@@ -44,6 +44,22 @@ it('stores a realization for the authenticated student and rejects invalid submi
         ->assertUnprocessable()->assertJsonValidationErrors('realization');
 });
 
+it('isolates realization submissions from other authenticated request throttles', function () {
+    $student = realizationStudent('rate-limit-owner@example.test');
+    $category = Category::create(['name' => 'Rate Limit Category', 'sort_order' => 1, 'is_active' => true]);
+    $lesson = realizationLesson($category, 'Rate Limit Lesson');
+
+    for ($attempt = 0; $attempt < 10; $attempt++) {
+        $this->actingAs($student)->postJson("/api/lessons/{$lesson->id}/playback-session")->assertNotFound();
+    }
+
+    $this->actingAs($student)->postJson("/api/lessons/{$lesson->id}/realizations", [
+        'realization' => 'This first realization should have its own throttle bucket.',
+    ])->assertCreated();
+
+    expect(StudentRealization::where('student_id', $student->id)->where('lesson_id', $lesson->id)->count())->toBe(1);
+});
+
 it('requires an authorized admin to view realization monitoring', function () {
     $this->getJson('/api/admin/realizations')->assertUnauthorized();
     $this->actingAs(realizationStudent('blocked-realization@example.test'))->getJson('/api/admin/realizations')->assertForbidden();

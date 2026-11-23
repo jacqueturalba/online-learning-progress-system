@@ -85,18 +85,20 @@ test('student playback uses the protected stream, hides download controls, and r
   await page.route('**/api/me', route => route.fulfill({ json: { user: { id: 8, name: 'Student', email: 'student@example.test', role: 'student' } } }));
   await page.route('**/api/learning', route => route.fulfill({ json: { categories: [{
     id: 1, name: 'Basic', description: null, total_lessons: 1, completed_lessons: 0, progress_percentage: 0,
-    lessons: [{ id: 9, title: 'Resume lesson', description: null, video_stream_url: '/api/lessons/9/video', duration_seconds: 100, sort_order: 1, is_unlocked: true, realization_submitted: false, progress: {
+    lessons: [{ id: 9, title: 'Resume lesson', description: null, video_stream_url: null, has_video: true, duration_seconds: 100, sort_order: 1, is_unlocked: true, realization_submitted: false, progress: {
       last_position_seconds: 24, watched_seconds: 30, progress_percentage: 30, is_completed: false, last_watched_at: '2026-11-01T00:00:00Z',
     } }],
   }] } }));
   let lastPosition = -1;
+  await page.route('**/api/lessons/9/playback-session', route => route.fulfill({ json: { video_url: '/api/lessons/9/video?playback=testtoken', playback_token: 'testtoken', expires_in_seconds: 7200 } }));
+  await page.route('**/api/lessons/9/playback-session/renew', route => route.fulfill({ json: { video_url: '/api/lessons/9/video?playback=testtoken', playback_token: 'testtoken', expires_in_seconds: 7200 } }));
   await page.route('**/api/lessons/9/progress', async route => {
     const body = route.request().postDataJSON();
     lastPosition = body.position_seconds;
     return route.fulfill({ json: { progress: { last_position_seconds: lastPosition, watched_seconds: 30, progress_percentage: 30, is_completed: false, last_watched_at: '2026-11-02T00:00:00Z' } } });
   });
   let streamRequested = false;
-  await page.route('**/api/lessons/9/video', route => {
+  await page.route('**/api/lessons/9/video**', route => {
     streamRequested = true;
     return route.fulfill({ status: 200, contentType: 'video/mp4', body: Buffer.alloc(1024) });
   });
@@ -106,12 +108,14 @@ test('student playback uses the protected stream, hides download controls, and r
   const video = page.locator('.lesson-modal video');
   await expect(video).toBeVisible();
   await expect(video).toHaveAttribute('controlslist', /nodownload/);
-  await expect(video).toHaveAttribute('src', '/api/lessons/9/video');
+  await expect(video).toHaveAttribute('src', '/api/lessons/9/video?playback=testtoken');
   await expect(page.locator('.lesson-modal a[download]')).toHaveCount(0);
   const contextMenuPrevented = await video.evaluate(element => {
     const contextMenu = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
     element.dispatchEvent(contextMenu);
-    return contextMenu.defaultPrevented;
+    const surfaceContextMenu = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+    element.closest('.video-player-surface')?.dispatchEvent(surfaceContextMenu);
+    return contextMenu.defaultPrevented && surfaceContextMenu.defaultPrevented;
   });
   expect(contextMenuPrevented).toBe(true);
   await video.evaluate(element => element.dispatchEvent(new Event('loadedmetadata')));
@@ -139,16 +143,26 @@ test('student stays on a completed lesson until its realization unlocks Next Les
   await page.route('**/api/learning', route => route.fulfill({ json: { categories: [{
     id: 1, name: 'Basic', description: null, total_lessons: 2, completed_lessons: isCompleted ? 1 : 0, progress_percentage: isCompleted ? 50 : 0,
     lessons: [
-      { id: 11, title: 'Basic lesson 1', description: null, video_stream_url: '/api/lessons/11/video', duration_seconds: 100, sort_order: 1, is_unlocked: true, realization_submitted: hasRealization, progress: { last_position_seconds: 0, watched_seconds: isCompleted ? 90 : 0, progress_percentage: isCompleted ? 90 : 0, is_completed: isCompleted, last_watched_at: null } },
-      { id: 12, title: 'Basic lesson 2', description: null, video_stream_url: isCompleted && hasRealization ? '/api/lessons/12/video' : null, duration_seconds: 100, sort_order: 2, is_unlocked: isCompleted && hasRealization, realization_submitted: false, progress: null },
+      { id: 11, title: 'Basic lesson 1', description: null, video_stream_url: null, has_video: true, duration_seconds: 100, sort_order: 1, is_unlocked: true, realization_submitted: hasRealization, progress: { last_position_seconds: 0, watched_seconds: isCompleted ? 90 : 0, progress_percentage: isCompleted ? 90 : 0, is_completed: isCompleted, last_watched_at: null } },
+      { id: 12, title: 'Basic lesson 2', description: null, video_stream_url: null, has_video: true, duration_seconds: 100, sort_order: 2, is_unlocked: isCompleted && hasRealization, realization_submitted: false, progress: null },
     ],
   }] } }));
   await page.route('**/api/lessons/11/progress', route => route.fulfill({ json: { progress: { last_position_seconds: isCompleted ? 95 : 50, watched_seconds: isCompleted ? 90 : 50, progress_percentage: isCompleted ? 90 : 50, is_completed: isCompleted, last_watched_at: '2026-11-02T00:00:00Z' } } }));
+  let realizationRequests = 0;
   await page.route('**/api/lessons/11/realizations', async route => {
+    realizationRequests++;
+    if (realizationRequests === 1) {
+      return route.fulfill({ status: 422, json: { message: 'The given data was invalid.', errors: { realization: ['Please revise this response.'] } } });
+    }
     hasRealization = true;
     return route.fulfill({ status: 201, json: { realization: { id: 5, lesson_id: 11, realization: 'I learned this lesson.', submitted_at: '2026-11-02T00:00:00Z' } } });
   });
-  await page.route('**/api/lessons/*/video', route => route.fulfill({ status: 200, contentType: 'video/mp4', body: Buffer.alloc(1024) }));
+  await page.route('**/api/lessons/*/playback-session', route => {
+    const lessonId = route.request().url().match(/lessons\/(\d+)\/playback-session/)?.[1];
+    return route.fulfill({ json: { video_url: `/api/lessons/${lessonId}/video?playback=testtoken`, playback_token: 'testtoken', expires_in_seconds: 7200 } });
+  });
+  await page.route('**/api/lessons/*/playback-session/renew', route => route.fulfill({ json: { playback_token: 'testtoken', expires_in_seconds: 7200 } }));
+  await page.route('**/api/lessons/*/video**', route => route.fulfill({ status: 200, contentType: 'video/mp4', body: Buffer.alloc(1024) }));
 
   await page.goto('/');
   await page.getByRole('button', { name: 'Continue learning' }).click();
@@ -168,8 +182,12 @@ test('student stays on a completed lesson until its realization unlocks Next Les
 
   await page.getByLabel('What did you take away from this lesson?').fill('I learned this lesson.');
   await page.getByRole('button', { name: 'Save realization' }).click();
+  await expect(page.getByRole('alert')).toContainText('The given data was invalid.');
+  await expect(page.getByLabel('What did you take away from this lesson?')).toHaveValue('I learned this lesson.');
+  await page.getByRole('button', { name: 'Save realization' }).evaluate(button => { (button as HTMLButtonElement).click(); (button as HTMLButtonElement).click(); });
   await expect(page.getByRole('button', { name: 'Next Lesson' })).toBeEnabled();
   await expect(page.getByText('Realization saved. The next lesson is ready when you are.')).toBeVisible();
+  expect(realizationRequests).toBe(2);
   const playCallsBeforeNext = await page.evaluate(() => (window as any).__playCalls());
   await page.getByRole('button', { name: 'Next Lesson' }).click();
   await expect(page.getByRole('heading', { name: 'Basic lesson 2' })).toBeVisible();
@@ -179,4 +197,56 @@ test('student stays on a completed lesson until its realization unlocks Next Les
   expect(await page.evaluate(() => (window as any).__playCalls())).toBe(playCallsBeforeNext);
   await page.getByRole('button', { name: 'Previous Lesson' }).click();
   await expect(page.getByRole('heading', { name: 'Basic lesson 1' })).toBeVisible();
+});
+
+test('renews a playback session during an hour-long paused and resumed lesson without changing the video URL or position', async ({ page }) => {
+  const baseTime = Date.UTC(2026, 10, 13, 0, 0, 0);
+  await page.clock.install({ time: new Date(baseTime) });
+  await page.addInitScript(() => {
+    const positions = new WeakMap<HTMLMediaElement, number>();
+    Object.defineProperty(HTMLMediaElement.prototype, 'currentTime', {
+      configurable: true,
+      get() { return positions.get(this) ?? 0; },
+      set(value) { positions.set(this, Number(value)); },
+    });
+    HTMLMediaElement.prototype.play = function () { this.dispatchEvent(new Event('play')); return Promise.resolve(); };
+    HTMLMediaElement.prototype.pause = function () { this.dispatchEvent(new Event('pause')); };
+  });
+  await page.route('**/api/me', route => route.fulfill({ json: { user: { id: 10, name: 'Student', email: 'student@example.test', role: 'student' } } }));
+  await page.route('**/api/learning', route => route.fulfill({ json: { categories: [{ id: 1, name: 'Basic', total_lessons: 1, completed_lessons: 0, progress_percentage: 0, lessons: [{
+    id: 21, title: 'One hour lesson', has_video: true, video_stream_url: null, duration_seconds: 3600, sort_order: 1,
+    is_unlocked: true, realization_submitted: false, progress: { last_position_seconds: 0, watched_seconds: 0, progress_percentage: 0, is_completed: false, last_watched_at: null },
+  }] }] } }));
+  let renewals = 0;
+  await page.route('**/api/lessons/21/playback-session', route => route.fulfill({ json: {
+    video_url: '/api/lessons/21/video?playback=stable-token', playback_token: 'stable-token', expires_in_seconds: 60 * 60,
+  } }));
+  await page.route('**/api/lessons/21/playback-session/renew', route => {
+    renewals++;
+    return route.fulfill({ json: { playback_token: 'stable-token', expires_in_seconds: 3 * 60 * 60 } });
+  });
+  const ranges: string[] = [];
+  await page.route('**/api/lessons/21/video**', route => {
+    ranges.push(route.request().headers().range || '');
+    return route.fulfill({ status: route.request().headers().range ? 206 : 200, contentType: 'video/mp4', body: Buffer.alloc(1024), headers: route.request().headers().range ? { 'Content-Range': 'bytes 0-3/1024', 'Accept-Ranges': 'bytes' } : {} });
+  });
+  await page.route('**/api/lessons/21/progress', route => route.fulfill({ json: { progress: { last_position_seconds: 1800, watched_seconds: 1800, progress_percentage: 50, is_completed: true, last_watched_at: '2026-11-13T00:00:00Z' } } }));
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'One hour lesson' }).click();
+  const video = page.locator('.lesson-modal video');
+  await expect(video).toBeVisible();
+  const originalUrl = await video.getAttribute('src');
+  await video.evaluate(element => { element.play(); element.currentTime = 3300; element.dispatchEvent(new Event('timeupdate')); });
+  await page.clock.fastForward(55 * 60 * 1000);
+  await expect.poll(() => renewals).toBe(1);
+  await expect(video).toHaveAttribute('src', originalUrl!);
+  await expect.poll(() => video.evaluate(element => element.currentTime)).toBe(3300);
+  await video.evaluate(element => { element.pause(); element.currentTime = 3590; element.dispatchEvent(new Event('seeking')); });
+  await page.evaluate(async url => {
+    await fetch(url, { headers: { Range: 'bytes=0-3' } });
+  }, originalUrl);
+  expect(ranges).toContain('bytes=0-3');
+  await video.evaluate(element => { element.play(); element.currentTime = 3591; element.dispatchEvent(new Event('timeupdate')); });
+  await expect.poll(() => video.evaluate(element => element.currentTime)).toBe(3591);
 });
