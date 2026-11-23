@@ -4,7 +4,8 @@ use App\Http\Controllers\AuthController;
 use App\Http\Controllers\LearningController;
 use Illuminate\Support\Facades\Route;
 
-Route::get('/', fn () => view('app'));
+/*Route::get('/', fn () => view('app'));*/
+Route::redirect('/', '/login');
 Route::get('/login', fn () => view('app'))->name('login');
 Route::get('/register', fn () => view('app'))->name('register');
 Route::get('/reset-password/{token}', fn () => view('app'))->middleware('guest')->name('password.reset');
