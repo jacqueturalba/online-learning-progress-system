@@ -1,13 +1,27 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue';
+import { onMounted, onUnmounted, reactive, ref } from 'vue';
+import { subtitleWorkflowPollingState } from '../utils/subtitlePolling';
+import { reconcileServerDraft } from '../utils/subtitleDrafts';
 
 type Category = { id: number; name: string; deleted_at: string | null };
 type Lesson = { id: number; category_id: number; title: string; description: string | null; video_stream_url: string | null; thumbnail_url: string | null; duration_seconds: number | null; sort_order: number; is_published: boolean; deleted_at: string | null; progress_count: number; category?: Category };
+type SubtitleVersion = { operation_id: number; language: 'en' | 'fil'; version_id: string; approved_at: string | null; is_current: boolean; download_url: string };
+type SubtitleWorkflow = { preparations: any[]; transcripts: any[]; alignments: any[]; translations: any[] };
 const MAX_VIDEO_SIZE_BYTES = 1000 * 1024 * 1024;
 const csrf = () => document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content || '';
 const lessons = ref<Lesson[]>([]), categories = ref<Category[]>([]), total = ref(0), loading = ref(false), saving = ref(false), uploading = ref(false), uploadPercent = ref<number | null>(null), error = ref(''), notice = ref('');
 const search = ref(''), categoryId = ref(''), status = ref('all'), page = ref(1), lastPage = ref(1), editing = ref<number | null>(null);
 const uploadInputKey = ref(0);
+const subtitleLessonId = ref(''), subtitleVersions = ref<SubtitleVersion[]>([]), subtitleFiles = reactive<Record<number, File | null>>({});
+const subtitleLesson = ref<Lesson | null>(null), subtitleWorkflow = ref<SubtitleWorkflow | null>(null), workflowBusy = ref(false), workflowError = ref('');
+const workflowNotice = ref('');
+const workflowWarning = ref('');
+const workflowLoading = ref(false);
+const transcriptDrafts = reactive<Record<number, string>>({}), translationDrafts = reactive<Record<number, string>>({}), alignmentSrtDrafts = reactive<Record<number, string>>({});
+const transcriptServerValues = reactive<Record<number, string>>({}), translationServerValues = reactive<Record<number, string>>({});
+let subtitlePoll: ReturnType<typeof setTimeout> | null = null;
+let subtitlePollFailures = 0;
+const SUBTITLE_POLL_INTERVAL_MS = 10_000;
 const thumbnailFile = ref<File | null>(null), thumbnailPreview = ref<string | null>(null), removeThumbnail = ref(false);
 const form = reactive({ category_id: '', title: '', video: null as File | null, description: '', duration_seconds: '', sort_order: '', is_published: false });
 async function request(url: string, method = 'GET', body?: unknown) {
@@ -112,13 +126,222 @@ async function archive(lesson: Lesson) { error.value = ''; try { await request(`
 async function restore(lesson: Lesson) { error.value = ''; try { await request(`/api/admin/lessons/${lesson.id}/restore`, 'POST'); notice.value = 'Lesson restored.'; await load(); } catch (caught) { error.value = (caught as Error).message; } }
 async function move(lesson: Lesson, direction: 'up' | 'down') { error.value = ''; try { await request(`/api/admin/lessons/${lesson.id}/move`, 'PATCH', { direction }); await load(); } catch (caught) { error.value = (caught as Error).message; } }
 function onFilter() { page.value = 1; void load(); }
+function chooseSubtitleFile(operationId: number, event: Event) { subtitleFiles[operationId] = (event.target as HTMLInputElement).files?.[0] || null; }
+type SubtitleChunk = { operation_id?: number | null; status?: string; error_code?: string | null; error_message?: string | null };
+function preparationHasFailedChunk(preparation: { chunks?: SubtitleChunk[] }) {
+  return (preparation.chunks ?? []).some(chunk => chunk.status === 'failed');
+}
+function failedTranscriptionChunks(preparation: { chunks?: SubtitleChunk[] }) {
+  return (preparation.chunks ?? []).filter(chunk => chunk.status === 'failed');
+}
+function stopSubtitlePolling() {
+  if (subtitlePoll) clearTimeout(subtitlePoll);
+  subtitlePoll = null;
+}
+function scheduleSubtitlePolling(workflow: SubtitleWorkflow | null) {
+  stopSubtitlePolling();
+  if (!workflow || !subtitleLessonId.value) return;
+  const pollingState = subtitleWorkflowPollingState(workflow);
+  workflowWarning.value = pollingState.warning || '';
+  if (!pollingState.shouldPoll) return;
+  subtitlePoll = setTimeout(() => void refreshSubtitleWorkspace(false), SUBTITLE_POLL_INTERVAL_MS);
+}
+async function refreshSubtitleWorkspace(manual = true) {
+  if (!subtitleLessonId.value || workflowLoading.value) return;
+  if (manual) subtitlePollFailures = 0;
+  workflowLoading.value = true; workflowError.value = '';
+  try {
+    const [workflow, subtitles] = await Promise.all([
+      request(`/api/admin/lessons/${subtitleLessonId.value}/subtitle-workflow`),
+      request(`/api/admin/lessons/${subtitleLessonId.value}/subtitles`),
+    ]);
+    subtitleWorkflow.value = workflow;
+    subtitleVersions.value = subtitles.subtitles || [];
+    for (const transcript of workflow.transcripts || []) {
+      reconcileServerDraft(transcriptDrafts, transcriptServerValues, transcript.operation_id, transcript.text || '');
+    }
+    for (const translation of workflow.translations || []) {
+      reconcileServerDraft(translationDrafts, translationServerValues, translation.operation_id, translation.text || '');
+    }
+    for (const alignment of workflow.alignments || []) {
+      if (alignment.status === 'succeeded' && alignmentSrtDrafts[alignment.operation_id] === undefined) {
+        try {
+          const preview = await request(`/api/admin/whisperx-alignments/${alignment.operation_id}/preview`);
+          alignmentSrtDrafts[alignment.operation_id] = preview.srt_text;
+        } catch { alignmentSrtDrafts[alignment.operation_id] = ''; }
+      }
+    }
+    subtitlePollFailures = 0;
+  } catch (caught) {
+    workflowError.value = (caught as Error).message;
+    if (!manual && ++subtitlePollFailures < 4 && subtitleLessonId.value) {
+      stopSubtitlePolling();
+      subtitlePoll = setTimeout(() => void refreshSubtitleWorkspace(false), SUBTITLE_POLL_INTERVAL_MS * subtitlePollFailures);
+    } else if (subtitlePollFailures >= 4) {
+      workflowWarning.value = 'Automatic status checks paused after repeated connection errors. Use Refresh status to try again.';
+    }
+  }
+  finally {
+    workflowLoading.value = false;
+    if (subtitleWorkflow.value && !workflowError.value) scheduleSubtitlePolling(subtitleWorkflow.value);
+  }
+}
+async function openSubtitleWorkspace(lesson: Lesson) {
+  stopSubtitlePolling();
+  subtitleLesson.value = lesson; subtitleLessonId.value = String(lesson.id); subtitleWorkflow.value = null;
+  workflowError.value = ''; workflowNotice.value = ''; workflowWarning.value = ''; workflowBusy.value = false; subtitlePollFailures = 0;
+  await refreshSubtitleWorkspace();
+}
+function closeSubtitleWorkspace() {
+  stopSubtitlePolling(); subtitleLesson.value = null; subtitleWorkflow.value = null; subtitleLessonId.value = '';
+}
+async function generateEnglishTranscript() {
+  if (!subtitleLesson.value || workflowBusy.value) return;
+  if (!window.confirm('Prepare lesson audio and queue English transcription? The assigned provider may charge for transcription.')) return;
+  workflowBusy.value = true; workflowError.value = '';
+  try { await request(`/api/admin/lessons/${subtitleLesson.value.id}/subtitle-workflow/transcribe`, 'POST', {}); await refreshSubtitleWorkspace(); }
+  catch (caught) {
+    const requestError = (caught as Error).message;
+    await refreshSubtitleWorkspace();
+    if (!subtitleWorkflow.value?.preparations.some(preparation => preparation.status === 'failed')) workflowError.value = requestError;
+  }
+  finally { workflowBusy.value = false; }
+}
+async function saveEnglishTranscript(transcriptId: number) {
+  if (!subtitleLesson.value) return;
+  try { await request(`/api/admin/lessons/${subtitleLesson.value.id}/transcripts/${transcriptId}/draft`, 'PUT', { text: transcriptDrafts[transcriptId] }); await refreshSubtitleWorkspace(); }
+  catch (caught) { workflowError.value = (caught as Error).message; }
+}
+async function approveEnglishTranscript(transcriptId: number) {
+  if (!subtitleLesson.value) return;
+  try {
+    await request(`/api/admin/lessons/${subtitleLesson.value.id}/transcripts/${transcriptId}/draft`, 'PUT', { text: transcriptDrafts[transcriptId] });
+    await request(`/api/admin/lessons/${subtitleLesson.value.id}/transcripts/${transcriptId}/approve`, 'POST', { language: 'en' });
+    workflowNotice.value = 'English transcript approved.'; await refreshSubtitleWorkspace();
+  }
+  catch (caught) { workflowError.value = (caught as Error).message; }
+}
+async function alignEnglishTranscript(transcriptId: number) {
+  if (!subtitleLesson.value) return;
+  workflowBusy.value = true; workflowError.value = '';
+  try { await request(`/api/admin/lessons/${subtitleLesson.value.id}/whisperx-alignments`, 'POST', { transcript_operation_id: transcriptId }); await refreshSubtitleWorkspace(); }
+  catch (caught) { workflowError.value = (caught as Error).message; }
+  finally { workflowBusy.value = false; }
+}
+async function approveEnglishSubtitle(alignmentId: number) {
+  if (!subtitleLesson.value) return;
+  try {
+    await request(`/api/admin/lessons/${subtitleLesson.value.id}/subtitles/${alignmentId}/en/approve`, 'POST', { srt_text: alignmentSrtDrafts[alignmentId] });
+    await refreshSubtitleWorkspace();
+  } catch (caught) { workflowError.value = (caught as Error).message; }
+}
+async function generateFilipinoTranslation(transcriptId: number) {
+  if (!subtitleLesson.value) return;
+  if (!window.confirm('Queue a Filipino translation from the approved English transcript? The assigned provider may charge for translation.')) return;
+  workflowBusy.value = true; workflowError.value = '';
+  try { await request(`/api/admin/lessons/${subtitleLesson.value.id}/transcripts/${transcriptId}/translate`, 'POST', {}); await refreshSubtitleWorkspace(); }
+  catch (caught) { workflowError.value = (caught as Error).message; }
+  finally { workflowBusy.value = false; }
+}
+async function saveFilipinoTranslation(translationId: number) {
+  if (!subtitleLesson.value) return;
+  try { await request(`/api/admin/lessons/${subtitleLesson.value.id}/translations/${translationId}/draft`, 'PUT', { text: translationDrafts[translationId] }); await refreshSubtitleWorkspace(); }
+  catch (caught) { workflowError.value = (caught as Error).message; }
+}
+async function approveFilipinoSubtitle(translationId: number) {
+  if (!subtitleLesson.value) return;
+  const file = subtitleFiles[translationId];
+  if (!file) { workflowError.value = 'Choose a timed Filipino .SRT file to approve.'; return; }
+  const body = new FormData(); body.append('srt_file', file);
+  try {
+    await request(`/api/admin/lessons/${subtitleLesson.value.id}/translations/${translationId}/draft`, 'PUT', { text: translationDrafts[translationId] });
+    await request(`/api/admin/lessons/${subtitleLesson.value.id}/subtitles/${translationId}/fil/approve`, 'POST', body);
+    delete subtitleFiles[translationId]; workflowNotice.value = 'Filipino subtitle version approved.'; await refreshSubtitleWorkspace();
+  } catch (caught) { workflowError.value = (caught as Error).message; }
+}
 let searchTimer: ReturnType<typeof setTimeout>;
 function searchChanged() { clearTimeout(searchTimer); page.value = 1; searchTimer = setTimeout(load, 250); }
 onMounted(() => { resetForm(); void load(); });
+onUnmounted(stopSubtitlePolling);
 </script>
 
 <template>
-  <div class="admin-lessons-page">
+  <div v-if="subtitleLesson" class="subtitle-management-workspace">
+    <header class="subtitle-workspace-header"><button class="secondary-button" type="button" @click="closeSubtitleWorkspace">← Curriculum</button><div><p class="eyebrow">CURRICULUM · LESSONS</p><h2>{{ subtitleLesson.title }} · Subtitle Management</h2></div></header>
+    <p v-if="workflowError" class="student-error" role="alert">{{ workflowError }}</p>
+    <p v-if="workflowNotice" class="category-notice" role="status">{{ workflowNotice }}</p>
+    <p v-if="workflowWarning" class="subtitle-worker-warning" role="status">{{ workflowWarning }}</p>
+    <p v-if="workflowLoading && !subtitleWorkflow" class="category-empty-state">Loading subtitle workflow…</p>
+    <template v-if="subtitleWorkflow">
+      <section class="lesson-list-panel subtitle-workflow-section">
+        <div class="subtitle-workflow-toolbar"><span class="muted">Status refreshes while queue work is active.</span><button class="secondary-button" type="button" :disabled="workflowLoading" @click="refreshSubtitleWorkspace()">{{ workflowLoading ? 'Refreshing…' : 'Refresh status' }}</button></div>
+        <div class="category-editor-heading"><div><h3>English transcript</h3><p class="muted">Prepare audio, transcribe, edit, approve, then align with WhisperX.</p></div><span class="category-state" :class="subtitleWorkflow.transcripts.some(item => item.approved) ? 'available' : 'unavailable'">{{ subtitleWorkflow.transcripts.some(item => item.approved) ? 'Transcript approved' : 'Needs review' }}</span></div>
+        <button class="primary" type="button" :disabled="workflowBusy" @click="generateEnglishTranscript">{{ workflowBusy ? 'Queueing…' : 'Generate English transcript' }}</button>
+        <p class="muted">Audio preparation and transcription run in the background. Transcription uses the assigned provider.</p>
+        <div v-for="prep in subtitleWorkflow.preparations" :key="prep.operation_id" class="subtitle-operation-row">
+          <strong>Audio preparation #{{ prep.operation_id }}</strong><span class="category-state" :class="prep.status === 'succeeded' ? 'available' : prep.status === 'failed' ? 'unavailable' : 'archived'">{{ prep.status === 'succeeded' ? 'Audio ready' : prep.status === 'processing' ? 'Preparing audio' : prep.status }}</span>
+          <p v-if="prep.error_message" class="student-error">{{ prep.error_message }}</p>
+          <small v-if="prep.status === 'queued'">Waiting for the {{ prep.queue?.queue || 'audio preparation' }} queue worker.</small>
+          <small v-if="prep.status === 'succeeded' && !prep.chunks.length">Audio preparation finished; waiting for transcript status.</small>
+          <small v-for="chunk in prep.chunks" :key="chunk.operation_id || chunk.offset_seconds">Transcript chunk {{ chunk.operation_id || 'pending' }} · {{ Number(chunk.offset_seconds || 0).toFixed(3) }}s · {{ chunk.status === 'succeeded' ? 'transcribed' : chunk.status === 'processing' ? 'transcribing' : chunk.status === 'queued' ? `waiting in ${chunk.queue?.queue || 'default'} queue` : chunk.status }}</small>
+          <small v-for="chunk in failedTranscriptionChunks(prep)" :key="`error-${chunk.operation_id}`" class="student-error">Chunk {{ chunk.operation_id }} failed{{ chunk.error_code ? ` (${chunk.error_code})` : '' }}: {{ chunk.error_message || 'No error detail was recorded.' }}</small>
+          <small v-if="preparationHasFailedChunk(prep)" class="student-error">A transcription chunk failed. Check the operation error before retrying generation.</small>
+        </div>
+        <article v-for="transcript in subtitleWorkflow.transcripts" :key="transcript.operation_id" class="subtitle-operation-row">
+          <div class="subtitle-operation-heading"><strong>Transcript #{{ transcript.operation_id }}</strong><span class="category-state" :class="transcript.approved ? 'available' : transcript.status === 'failed' ? 'unavailable' : 'archived'">{{ transcript.approved ? 'Approved' : transcript.status === 'succeeded' ? 'Pending review' : transcript.status }}</span></div>
+          <small>Timeline offset {{ Number(transcript.offset_seconds || 0).toFixed(3) }} seconds</small>
+          <p v-if="transcript.error_message" class="student-error">{{ transcript.error_message }}</p>
+          <textarea v-model="transcriptDrafts[transcript.operation_id]" :disabled="transcript.status !== 'succeeded'" rows="5" aria-label="English transcript draft"></textarea>
+          <div class="subtitle-actions">
+            <button class="secondary-button" type="button" :disabled="transcript.status !== 'succeeded'" @click="saveEnglishTranscript(transcript.operation_id)">Save transcript draft</button>
+            <button class="secondary-button" type="button" :disabled="transcript.status !== 'succeeded' || transcript.approved" @click="approveEnglishTranscript(transcript.operation_id)">Approve English transcript</button>
+            <button class="secondary-button" type="button" :disabled="!transcript.approved || workflowBusy" @click="alignEnglishTranscript(transcript.operation_id)">Align with WhisperX</button>
+            <button class="secondary-button" type="button" :disabled="!transcript.english_subtitles_approved || workflowBusy" @click="generateFilipinoTranslation(transcript.operation_id)">Generate Filipino translation</button>
+          </div>
+        </article>
+      </section>
+
+      <section class="lesson-list-panel subtitle-workflow-section">
+        <div class="category-editor-heading"><div><h3>English subtitles</h3><p class="muted">Review the aligned SRT, edit if needed, then approve an immutable version.</p></div></div>
+        <p v-if="!subtitleWorkflow.alignments.length" class="category-empty-state">No alignment jobs yet. Approve an English transcript, then run WhisperX alignment.</p>
+        <article v-for="alignment in subtitleWorkflow.alignments" :key="alignment.operation_id" class="subtitle-operation-row">
+          <div class="subtitle-operation-heading"><strong>Alignment #{{ alignment.operation_id }}</strong><span class="category-state" :class="alignment.approved ? 'available' : alignment.status === 'failed' ? 'unavailable' : 'archived'">{{ alignment.approved ? 'Approved' : alignment.status === 'succeeded' ? 'Pending subtitle review' : alignment.status }}</span></div>
+          <p v-if="alignment.error_message" class="student-error">{{ alignment.error_message }}</p>
+          <textarea v-if="alignment.status === 'succeeded'" v-model="alignmentSrtDrafts[alignment.operation_id]" rows="8" aria-label="English SRT review draft"></textarea>
+          <button v-if="alignment.status === 'succeeded'" class="secondary-button" type="button" @click="approveEnglishSubtitle(alignment.operation_id)">{{ alignment.approved ? 'Approve revised English SRT' : 'Approve English SRT' }}</button>
+        </article>
+      </section>
+
+      <section class="lesson-list-panel subtitle-workflow-section">
+        <div class="category-editor-heading"><div><h3>Filipino translation and subtitles</h3><p class="muted">Translation is based on an approved English transcript and only enabled after English subtitles are approved.</p></div></div>
+        <p v-if="!subtitleWorkflow.translations.length" class="category-empty-state">No Filipino translations have been queued.</p>
+        <article v-for="translation in subtitleWorkflow.translations" :key="translation.operation_id" class="subtitle-operation-row">
+          <div class="subtitle-operation-heading"><strong>Translation #{{ translation.operation_id }}</strong><span class="category-state" :class="translation.approved ? 'available' : translation.status === 'failed' ? 'unavailable' : 'archived'">{{ translation.approved ? 'Approved' : translation.status === 'succeeded' ? 'Pending review' : translation.status }}</span></div>
+          <small>Target language: {{ translation.target_language || 'Filipino (legacy target)' }}</small>
+          <p v-if="translation.error_message" class="student-error">{{ translation.error_message }}</p>
+          <textarea v-model="translationDrafts[translation.operation_id]" :disabled="translation.status !== 'succeeded'" rows="5" aria-label="Filipino translation draft"></textarea>
+          <div class="subtitle-actions">
+            <button class="secondary-button" type="button" :disabled="translation.status !== 'succeeded'" @click="saveFilipinoTranslation(translation.operation_id)">Save Filipino draft</button>
+            <label>Timed Filipino SRT<input type="file" accept=".srt,application/x-subrip,text/plain" :aria-label="`Filipino SRT for translation ${translation.operation_id}`" @change="chooseSubtitleFile(translation.operation_id, $event)"></label>
+            <button class="secondary-button" type="button" :disabled="translation.status !== 'succeeded' || !subtitleFiles[translation.operation_id]" @click="approveFilipinoSubtitle(translation.operation_id)">{{ translation.approved ? 'Approve revised Filipino SRT' : 'Approve Filipino SRT' }}</button>
+          </div>
+          <small>Uploaded SRT cue text must match the reviewed translation exactly. Timing is not generated from text-only translation results.</small>
+        </article>
+      </section>
+
+      <section class="lesson-list-panel subtitle-workflow-section">
+        <div class="category-editor-heading"><div><h3>Approved subtitle downloads</h3><p class="muted">Each link downloads the exact approved version.</p></div></div>
+        <div v-for="language in ['en', 'fil']" :key="language" class="approved-subtitle-language">
+          <strong>{{ language === 'en' ? 'English .SRT' : 'Filipino .SRT' }}</strong>
+          <a v-for="version in subtitleVersions.filter(item => item.language === language)" :key="version.version_id" :href="version.download_url" class="text-link">Download {{ version.is_current ? 'current approved' : 'approved' }} version{{ version.approved_at ? ` · ${new Date(version.approved_at).toLocaleDateString()}` : '' }}</a>
+          <span v-if="!subtitleVersions.some(item => item.language === language)" class="category-state unavailable">Not approved</span>
+        </div>
+        <div class="approved-subtitle-language future-video-download"><strong>Video with selectable subtitle tracks</strong><span class="category-state unavailable">Future enhancement</span></div>
+        <small>Subtitle downloads are available only to authorized admins.</small>
+      </section>
+    </template>
+  </div>
+  <div v-else class="admin-lessons-page">
     <section class="lesson-editor-panel">
       <div class="category-editor-heading"><div><p class="eyebrow">VIDEO LIBRARY</p><h2>{{ editing ? 'Edit lesson' : 'Add lesson' }}</h2></div><button v-if="editing" class="secondary-button" type="button" @click="resetForm">Cancel</button></div>
       <form class="lesson-editor-form" @submit.prevent="save">
@@ -138,7 +361,7 @@ onMounted(() => { resetForm(); void load(); });
       <div class="category-editor-heading"><div><p class="eyebrow">CURRICULUM</p><h2>Lessons <span class="category-total">{{ total }}</span></h2></div></div>
       <div class="lesson-filters"><label>Search lessons<input v-model="search" type="search" placeholder="Search by title" @input="searchChanged"></label><label>Category<select v-model="categoryId" @change="onFilter"><option value="">All categories</option><option v-for="category in categories" :key="category.id" :value="String(category.id)">{{ category.name }}{{ category.deleted_at ? ' (Archived)' : '' }}</option></select></label><label>Status<select v-model="status" @change="onFilter"><option value="all">All lessons</option><option value="published">Published</option><option value="draft">Draft</option><option value="archived">Archived</option></select></label></div>
       <div v-if="loading" class="category-empty-state">Loading lessons…</div><div v-else-if="!lessons.length" class="category-empty-state">No lessons match these filters.</div>
-      <div v-else class="managed-lesson-list"><article v-for="lesson in lessons" :key="lesson.id" class="managed-lesson-card" :class="{ 'is-archived': !!lesson.deleted_at }"><img v-if="lesson.thumbnail_url" class="admin-lesson-thumb" :src="lesson.thumbnail_url" :alt="`${lesson.title} thumbnail`"><div v-else class="admin-lesson-thumb fallback">▶</div><div class="managed-lesson-copy"><div class="managed-lesson-heading"><h3>{{ lesson.title }}</h3><span class="category-state" :class="lesson.deleted_at ? 'archived' : lesson.is_published ? 'available' : 'unavailable'">{{ lesson.deleted_at ? 'Archived' : lesson.is_published ? 'Published' : 'Draft' }}</span></div><p>{{ lesson.category?.name || 'Archived category' }} <span>·</span> Order {{ lesson.sort_order }} <span>·</span> {{ lesson.duration_seconds ? `${Math.floor(lesson.duration_seconds / 60)}:${String(lesson.duration_seconds % 60).padStart(2, '0')}` : 'Duration not set' }} <span>·</span> {{ lesson.progress_count }} progress records</p></div><div class="managed-lesson-actions"><template v-if="!lesson.deleted_at"><button v-if="status === 'all'" class="category-action" :aria-label="`Move ${lesson.title} up`" @click="move(lesson, 'up')">↑</button><button v-if="status === 'all'" class="category-action" :aria-label="`Move ${lesson.title} down`" @click="move(lesson, 'down')">↓</button><button class="category-action" :aria-label="`Edit ${lesson.title}`" @click="edit(lesson)">Edit</button><button class="category-action archive" :aria-label="`Archive ${lesson.title}`" @click="archive(lesson)">Archive</button></template><button v-else class="category-action restore" :aria-label="`Restore ${lesson.title}`" @click="restore(lesson)">Restore</button></div></article></div>
+      <div v-else class="managed-lesson-list"><article v-for="lesson in lessons" :key="lesson.id" class="managed-lesson-card" :class="{ 'is-archived': !!lesson.deleted_at }"><img v-if="lesson.thumbnail_url" class="admin-lesson-thumb" :src="lesson.thumbnail_url" :alt="`${lesson.title} thumbnail`"><div v-else class="admin-lesson-thumb fallback">▶</div><div class="managed-lesson-copy"><div class="managed-lesson-heading"><h3>{{ lesson.title }}</h3><span class="category-state" :class="lesson.deleted_at ? 'archived' : lesson.is_published ? 'available' : 'unavailable'">{{ lesson.deleted_at ? 'Archived' : lesson.is_published ? 'Published' : 'Draft' }}</span></div><p>{{ lesson.category?.name || 'Archived category' }} <span>·</span> Order {{ lesson.sort_order }} <span>·</span> {{ lesson.duration_seconds ? `${Math.floor(lesson.duration_seconds / 60)}:${String(lesson.duration_seconds % 60).padStart(2, '0')}` : 'Duration not set' }} <span>·</span> {{ lesson.progress_count }} progress records</p></div><div class="managed-lesson-actions"><template v-if="!lesson.deleted_at"><button v-if="status === 'all'" class="category-action" :aria-label="`Move ${lesson.title} up`" @click="move(lesson, 'up')">↑</button><button v-if="status === 'all'" class="category-action" :aria-label="`Move ${lesson.title} down`" @click="move(lesson, 'down')">↓</button><button class="category-action" :aria-label="`Edit ${lesson.title}`" @click="edit(lesson)">Edit</button><button class="category-action" :aria-label="`Manage subtitles for ${lesson.title}`" @click="openSubtitleWorkspace(lesson)">Subtitles</button><button class="category-action archive" :aria-label="`Archive ${lesson.title}`" @click="archive(lesson)">Archive</button></template><button v-else class="category-action restore" :aria-label="`Restore ${lesson.title}`" @click="restore(lesson)">Restore</button></div></article></div>
       <div v-if="lastPage > 1" class="lesson-pagination"><button class="secondary-button" :disabled="page <= 1" @click="page--; load()">Previous</button><span>Page {{ page }} of {{ lastPage }}</span><button class="secondary-button" :disabled="page >= lastPage" @click="page++; load()">Next</button></div>
     </section>
   </div>

@@ -24,7 +24,7 @@ it('provides structured database-backed insight summaries to admins', function (
     ]);
     DB::table('pace_groups')->where('code', 'A')->update(['weekly_target' => 2]);
     $category = Category::create(['name' => 'Insights category', 'sort_order' => 1, 'is_active' => true]);
-    $completedAt = now()->subDays(2);
+    $completedAt = now()->subMinutes(20);
     $lessons = collect(['Lesson one', 'Lesson two'])->map(fn (string $title, int $index) => Lesson::create([
         'category_id' => $category->id, 'title' => $title, 'sort_order' => $index + 1,
         'duration_seconds' => 120, 'is_published' => true,
@@ -35,10 +35,10 @@ it('provides structured database-backed insight summaries to admins', function (
             'student_id' => $student->id,
             'lesson_id' => $lesson->id,
             'started_at' => $completedAt->copy()->subHour(),
-            'last_watched_at' => $completedAt->copy()->addDays($index),
+            'last_watched_at' => $completedAt->copy()->addMinutes($index * 5),
             'progress_percentage' => 100,
             'is_completed' => true,
-            'completed_at' => $completedAt->copy()->addDays($index),
+            'completed_at' => $completedAt->copy()->addMinutes($index * 5),
         ]);
     }
     StudentCategoryProgress::create([

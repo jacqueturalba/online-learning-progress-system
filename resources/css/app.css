@@ -350,6 +350,23 @@ button, a, input { -webkit-tap-highlight-color: transparent; }
 /* Admin lesson management */
 .admin-lessons-page { display: grid; grid-template-columns: minmax(250px, .65fr) minmax(0, 1.35fr); gap: 15px; align-items: start; }
 .lesson-editor-panel, .lesson-list-panel { min-width: 0; padding: 18px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.approved-subtitle-panel { grid-column: 1 / -1; }
+.approved-subtitle-list { display: grid; gap: 12px; margin-top: 16px; }
+.approved-subtitle-language { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(0, 2fr); gap: 8px 16px; align-items: center; padding: 12px 0; border-top: 1px solid var(--border); }
+.approved-subtitle-language .text-link { justify-self: start; }
+.approved-subtitle-language small { grid-column: 2; color: var(--text-secondary); }
+.subtitle-management-workspace { display: grid; gap: 15px; }
+.subtitle-workspace-header { display: flex; align-items: center; gap: 18px; padding: 8px 0; }
+.subtitle-workspace-header h2 { margin: 0; }
+.subtitle-workflow-section { display: grid; gap: 14px; }
+.subtitle-workflow-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.subtitle-worker-warning { padding: 12px 14px; border: 1px solid #f2c48f; border-radius: 10px; background: #fff7ed; color: #9a3412; }
+.subtitle-operation-row { display: grid; gap: 10px; padding: 14px 0; border-top: 1px solid var(--border); }
+.subtitle-operation-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.subtitle-operation-row textarea { width: 100%; min-height: 120px; box-sizing: border-box; font: inherit; }
+.subtitle-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+.subtitle-actions label { display: grid; gap: 5px; }
+.subtitle-actions input[type="file"] { max-width: 100%; }
 .lesson-editor-form { display: grid; gap: 12px; }
 .lesson-editor-form > label, .lesson-editor-row > label, .lesson-filters > label { display: grid; gap: 6px; color: var(--text-primary); font-size:12px; font-weight: 600; }
 .lesson-editor-form input:not([type=checkbox]), .lesson-editor-form select, .lesson-editor-form textarea, .lesson-filters input, .lesson-filters select { box-sizing: border-box; width: 100%; min-height: 39px; border: 1px solid var(--border); border-radius: 7px; padding: 9px 10px; color: var(--text-primary); background: var(--surface); font: inherit; font-size: 12px; font-weight: 400; }
