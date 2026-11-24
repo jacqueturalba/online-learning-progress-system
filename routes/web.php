@@ -35,6 +35,20 @@ Route::prefix('/admin')->middleware(['auth', 'role:admin'])->group(function () {
         ->name('admin.section');
 });
 Route::prefix('/api/admin')->middleware(['auth', 'role:admin'])->group(function () {
+    Route::get('/lessons/{lesson}/subtitles', [App\Http\Controllers\AdminSubtitleController::class, 'index'])->name('admin.subtitles.index');
+    Route::get('/lessons/{lesson}/subtitle-workflow', [App\Http\Controllers\AdminSubtitleWorkflowController::class, 'show'])->name('admin.subtitles.workflow');
+    Route::post('/lessons/{lesson}/subtitle-workflow/transcribe', [App\Http\Controllers\AdminSubtitleWorkflowController::class, 'transcribe']);
+    Route::put('/lessons/{lesson}/transcripts/{transcript}/draft', [App\Http\Controllers\AdminSubtitleWorkflowController::class, 'saveTranscript']);
+    Route::post('/lessons/{lesson}/transcripts/{transcript}/translate', [App\Http\Controllers\AdminSubtitleWorkflowController::class, 'translate']);
+    Route::put('/lessons/{lesson}/translations/{translation}/draft', [App\Http\Controllers\AdminSubtitleWorkflowController::class, 'saveTranslation']);
+    Route::post('/lessons/{lesson}/subtitles/{operation}/{language}/approve', [App\Http\Controllers\AdminSubtitleController::class, 'approve'])->whereIn('language', ['en', 'fil'])->name('admin.subtitles.approve');
+    Route::get('/lessons/{lesson}/subtitles/{language}/{operation}/{version}/download', [App\Http\Controllers\AdminSubtitleController::class, 'download'])->whereIn('language', ['en', 'fil'])->name('admin.subtitles.download');
+    Route::get('/lessons/{lesson}/transcripts/{transcript}', [App\Http\Controllers\AdminWhisperxAlignmentController::class, 'transcript']);
+    Route::post('/lessons/{lesson}/transcripts/{transcript}/approve', [App\Http\Controllers\AdminWhisperxAlignmentController::class, 'approveTranscript']);
+    Route::post('/lessons/{lesson}/whisperx-alignments', [App\Http\Controllers\AdminWhisperxAlignmentController::class, 'queue']);
+    Route::get('/whisperx-alignments/{operation}', [App\Http\Controllers\AdminWhisperxAlignmentController::class, 'show']);
+    Route::get('/whisperx-alignments/{operation}/preview', [App\Http\Controllers\AdminSubtitleController::class, 'previewAlignment']);
+    Route::get('/whisperx-alignments/{operation}/srt', [App\Http\Controllers\AdminWhisperxAlignmentController::class, 'srt']);
     Route::get('/dashboard', App\Http\Controllers\AdminDashboardController::class);
     Route::get('/students', [App\Http\Controllers\AdminStudentController::class, 'index']);
     Route::get('/students/{student}', [App\Http\Controllers\AdminStudentController::class, 'show']);
@@ -50,6 +64,13 @@ Route::prefix('/api/admin')->middleware(['auth', 'role:admin'])->group(function 
     Route::post('/students/{student}/password/reset', [App\Http\Controllers\AdminStudentController::class, 'resetPassword']);
     Route::get('/branding', [App\Http\Controllers\BrandingController::class, 'show']);
     Route::put('/branding', [App\Http\Controllers\BrandingController::class, 'update']);
+    Route::get('/ai-integrations', [App\Http\Controllers\AdminAiIntegrationController::class, 'index'])->can('viewAny', App\Models\AiIntegration::class);
+    Route::post('/ai-integrations', [App\Http\Controllers\AdminAiIntegrationController::class, 'store'])->can('create', App\Models\AiIntegration::class);
+    Route::put('/ai-integrations/{integration}', [App\Http\Controllers\AdminAiIntegrationController::class, 'update'])->can('update', 'integration');
+    Route::patch('/ai-integrations/{integration}/status', [App\Http\Controllers\AdminAiIntegrationController::class, 'setStatus'])->can('update', 'integration');
+    Route::delete('/ai-integrations/{integration}', [App\Http\Controllers\AdminAiIntegrationController::class, 'destroy'])->can('delete', 'integration');
+    Route::post('/ai-integrations/{integration}/test', [App\Http\Controllers\AdminAiIntegrationController::class, 'testConnection'])->can('testConnection', 'integration')->middleware('throttle:10,1');
+    Route::put('/ai-services/{service}', [App\Http\Controllers\AdminAiIntegrationController::class, 'assign'])->can('assign', App\Models\AiServiceAssignment::class);
     Route::put('/pace-groups', [App\Http\Controllers\AdminPaceGroupController::class, 'update']);
     Route::get('/progress', App\Http\Controllers\AdminProgressController::class);
     Route::get('/realizations', App\Http\Controllers\AdminRealizationController::class);

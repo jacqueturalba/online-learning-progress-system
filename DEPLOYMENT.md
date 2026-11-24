@@ -233,9 +233,15 @@ This clears stale optimized files and builds production config, event, route, an
 
 ### Session, cache, queue, scheduler
 
-Current configuration uses database sessions, file cache, and synchronous queues. The migrations create the `sessions` table; `storage/framework` must be writable for file cache and compiled views.
+The application uses database sessions and file cache. AI transcription and translation operations are queued; other queues may be synchronous. To enable queued AI work, use `QUEUE_CONNECTION=database` and `DB_QUEUE_RETRY_AFTER=150` in `.env`. The database queue migrations create `jobs` and `failed_jobs`; run `php artisan migrate --force` after deploying them.
 
-Code inspection found no `ShouldQueue` jobs and no scheduled commands in `routes/console.php`. No queue worker, Supervisor process, `queue:work`, or Scheduler cron entry is currently required. Do not switch `QUEUE_CONNECTION` to `database`/`redis` unless queue tables/services and worker lifecycle are deliberately provisioned. Recheck the implementation before adding cron or workers for a future feature.
+Keep the queue retry-after period longer than the AI job timeout (120 seconds). The application enforces a minimum of 150 seconds for database and Redis retry-after. Run a persistent worker under Supervisor or the hosting provider's process manager, for example:
+
+```bash
+php artisan queue:work database --queue=default --tries=3 --timeout=120 --sleep=3
+```
+
+Restart the worker after each deployment (`php artisan queue:restart`) so it loads the new code. Monitor failed jobs with `php artisan queue:failed`; review the stored safe error and retry only after correcting the underlying issue. Ensure `APP_KEY` is stable and backed up: queued AI input is encrypted with it and cannot be decrypted after changing the key. Confirm the worker runs under the same application release, `.env`, and filesystem permissions as PHP-FPM.
 
 ### HTTPS / SSL
 
