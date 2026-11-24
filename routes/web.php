@@ -27,6 +27,8 @@ Route::post('/api/lessons/{lesson}/playback-session', [LearningController::class
 Route::post('/api/lessons/{lesson}/playback-session/renew', [LearningController::class, 'renewPlayback'])->middleware(['auth', 'role:student', 'throttle:30,1']);
 Route::post('/api/lessons/{lesson}/playback-session/revoke', [LearningController::class, 'revokePlayback'])->middleware(['auth', 'role:student', 'throttle:30,1']);
 Route::get('/api/lessons/{lesson}/video', [LearningController::class, 'video'])->middleware(['auth', 'role:student', 'throttle:120,1'])->name('lessons.video');
+Route::get('/api/lessons/{lesson}/subtitles', [App\Http\Controllers\StudentSubtitleController::class, 'index'])->middleware(['auth', 'role:student', 'throttle:60,1'])->name('lessons.subtitles.index');
+Route::get('/api/lessons/{lesson}/subtitles/{language}', [App\Http\Controllers\StudentSubtitleController::class, 'track'])->whereIn('language', ['en', 'fil'])->middleware(['auth', 'role:student', 'throttle:120,1'])->name('lessons.subtitles.track');
 Route::put('/api/lessons/{lesson}/progress', [LearningController::class, 'saveProgress'])->middleware(['auth', 'role:student', 'throttle:60,1']);
 Route::post('/api/lessons/{lesson}/realizations', [App\Http\Controllers\StudentRealizationController::class, 'store'])->middleware(['auth', 'role:student', 'throttle:10,1,student-realizations:']);
 Route::prefix('/admin')->middleware(['auth', 'role:admin'])->group(function () {

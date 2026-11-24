@@ -81,17 +81,41 @@ class ApprovedSubtitleService
             if (!is_string($path) || !$disk->exists($path)) throw new RuntimeException('The aligned English SRT is unavailable.');
             $contents = $disk->get($path);
         } else {
-            throw new RuntimeException('A timed Filipino SRT file is required for approval.');
+            $path = $operation->result['subtitle_draft']['srt_path'] ?? null;
+            if (!is_string($path) || !$disk->exists($path)) throw new RuntimeException('A timed Filipino SRT draft is unavailable.');
+            $contents = $disk->get($path);
+            $expectedHash = $operation->result['subtitle_draft']['srt_sha256'] ?? null;
+            if (is_string($expectedHash) && !hash_equals($expectedHash, hash('sha256', $contents))) throw new RuntimeException('The Filipino SRT draft failed its integrity check.');
         }
 
-        if (!is_string($contents) || strlen($contents) > 5 * 1024 * 1024 || !$this->isSrt($contents)) {
-            throw new RuntimeException('The subtitle file is not a valid timed SRT.');
-        }
+        if (!is_string($contents) || strlen($contents) > 5 * 1024 * 1024) throw new RuntimeException('The subtitle file is not a valid timed SRT.');
         if (!mb_check_encoding($contents, 'UTF-8')) throw new RuntimeException('The SRT file must use UTF-8 text encoding.');
+        $cueService = app(SubtitleSrtCueService::class);
+        $parsedCues = $cueService->parse($contents);
         if ($language === 'fil') {
             $translationText = $operation->result['subtitle_draft']['text'] ?? $operation->result['text'] ?? '';
-            if (!is_string($translationText) || $this->normalizeText($this->srtCueText($contents)) !== $this->normalizeText($translationText)) {
+            if (!is_string($translationText) || $this->normalizeText(implode(' ', array_column($parsedCues, 'text'))) !== $this->normalizeText($translationText)) {
                 throw new RuntimeException('The Filipino SRT cue text must match the reviewed Filipino translation exactly.');
+            }
+            $draftCues = $operation->result['subtitle_draft']['cues'] ?? null;
+            if (is_array($draftCues)) {
+                if (count($draftCues) !== count($parsedCues)) throw new RuntimeException('The Filipino SRT must preserve every reviewed cue.');
+                foreach ($draftCues as $index => $cue) {
+                    if ((int) ($cue['index'] ?? 0) !== (int) ($parsedCues[$index]['index'] ?? 0)
+                        || $this->normalizeText((string) ($cue['text'] ?? '')) !== $this->normalizeText((string) ($parsedCues[$index]['text'] ?? ''))) {
+                        throw new RuntimeException('Each Filipino SRT cue must match its corresponding reviewed cue.');
+                    }
+                }
+            }
+            if (is_numeric($operation->result['source_alignment_operation_id'] ?? null)
+                && is_string($operation->result['source_english_srt_version_id'] ?? null)) {
+                $alignment = AiOperationUsage::query()->where('lesson_id', $lesson->id)
+                    ->where('service', WhisperxAlignmentService::ALIGNMENT_SERVICE)
+                    ->find((int) $operation->result['source_alignment_operation_id']);
+                if (!$alignment) throw new RuntimeException('The approved English timing source is unavailable.');
+                $sourceVersion = $this->approvedVersion($lesson, $alignment, 'en', $operation->result['source_english_srt_version_id']);
+                $sourceContents = $disk->get($sourceVersion['path']);
+                $cueService->assertSameTiming($cueService->parse($sourceContents), $cueService->parse($contents));
             }
         }
 
@@ -154,6 +178,46 @@ class ApprovedSubtitleService
         throw new RuntimeException('The requested approved subtitle version is unavailable.');
     }
 
+    /** Return the most recently approved current version for student playback. */
+    public function currentApprovedVersionForLesson(Lesson $lesson, string $language): ?array
+    {
+        $service = match ($language) {
+            'en' => WhisperxAlignmentService::ALIGNMENT_SERVICE,
+            'fil' => 'translation',
+            default => null,
+        };
+        if ($service === null) return null;
+
+        $current = null;
+        $currentTimestamp = -1;
+
+        foreach (AiOperationUsage::query()->where('lesson_id', $lesson->id)
+            ->where('service', $service)->where('status', 'succeeded')->orderByDesc('id')->cursor() as $operation) {
+            $result = is_array($operation->result) ? $operation->result : [];
+            $approvalStatus = $result['approval_statuses'][$language]
+                ?? ($language === 'en' ? ($result['approval_status'] ?? null) : null);
+            if ($approvalStatus !== 'approved') continue;
+
+            try {
+                $version = $this->approvedVersion($lesson, $operation, $language);
+            } catch (RuntimeException) {
+                continue;
+            }
+
+            $approvedTimestamp = is_string($version['approved_at'] ?? null)
+                ? (strtotime($version['approved_at']) ?: 0)
+                : 0;
+            if ($approvedTimestamp === 0) $approvedTimestamp = $operation->updated_at?->getTimestamp() ?? 0;
+
+            if ($approvedTimestamp > $currentTimestamp) {
+                $current = ['operation' => $operation, 'version' => $version];
+                $currentTimestamp = $approvedTimestamp;
+            }
+        }
+
+        return $current;
+    }
+
     private function assertOperationLanguage(Lesson $lesson, AiOperationUsage $operation, string $language): void
     {
         $expectedService = match ($language) {
@@ -170,23 +234,6 @@ class ApprovedSubtitleService
             && !in_array(mb_strtolower((string) $operation->result['target_language']), ['fil', 'fil-ph', 'filipino'], true)) {
             throw new RuntimeException('This translation operation is not a Filipino subtitle version.');
         }
-    }
-
-    private function isSrt(string $contents): bool
-    {
-        return preg_match('/\d{2}:\d{2}:\d{2},\d{3}\s+-->\s+\d{2}:\d{2}:\d{2},\d{3}/', $contents) === 1;
-    }
-
-    private function srtCueText(string $contents): string
-    {
-        $lines = preg_split('/\R/u', $contents) ?: [];
-        $textLines = [];
-        foreach ($lines as $line) {
-            $line = trim($line);
-            if ($line === '' || ctype_digit($line) || preg_match('/^\d{2}:\d{2}:\d{2},\d{3}\s+-->/', $line)) continue;
-            $textLines[] = $line;
-        }
-        return implode(' ', $textLines);
     }
 
     private function normalizeText(string $text): string

@@ -18,7 +18,7 @@ class RunAiOperation implements ShouldQueue
 
     public int $tries = 3;
     public array $backoff = [10, 60, 180];
-    public int $timeout = 120;
+    public int $timeout = 600;
 
     public function __construct(public readonly int $usageId, public readonly string $encryptedPayload) {}
 

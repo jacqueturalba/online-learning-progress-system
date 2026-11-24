@@ -47,11 +47,26 @@ it('keeps English and Filipino SRT versions private, immutable, and admin-only',
     ]);
 
     $this->actingAs($admin)->getJson('/api/admin/lessons/'.$lesson->id.'/subtitles')->assertOk()->assertJsonCount(0, 'subtitles');
-    $englishApproval = $this->postJson('/api/admin/lessons/'.$lesson->id.'/subtitles/'.$english->id.'/en/approve')->assertCreated();
+    $conflictingApproval = $this->withHeader('Accept', 'application/json')->post('/api/admin/lessons/'.$lesson->id.'/subtitles/'.$english->id.'/en/approve', [
+        'srt_file' => UploadedFile::fake()->createWithContent('conflicting.srt', $englishSrt),
+        'srt_text' => $englishSrt,
+    ]);
+    $conflictingApproval->assertUnprocessable()->assertJsonValidationErrors('srt_text');
+
+    $invalidInlineText = $this->postJson('/api/admin/lessons/'.$lesson->id.'/subtitles/'.$english->id.'/en/approve', [
+        'srt_text' => ['not', 'a', 'string'],
+    ]);
+    $invalidInlineText->assertUnprocessable()->assertJsonValidationErrors('srt_text');
+
+    $englishApproval = $this->postJson('/api/admin/lessons/'.$lesson->id.'/subtitles/'.$english->id.'/en/approve', [
+        'srt_text' => $englishSrt,
+    ])->assertCreated();
     $englishVersion = $englishApproval->json('version_id');
     $englishUrl = $englishApproval->json('download_url');
     $this->get($englishUrl)->assertOk()->assertHeader('Content-Type', 'application/x-subrip; charset=UTF-8')->assertSee('Hello there.');
-    $duplicateEnglish = $this->postJson('/api/admin/lessons/'.$lesson->id.'/subtitles/'.$english->id.'/en/approve')->assertCreated();
+    $duplicateEnglish = $this->postJson('/api/admin/lessons/'.$lesson->id.'/subtitles/'.$english->id.'/en/approve', [
+        'srt_text' => $englishSrt,
+    ])->assertCreated();
     expect($duplicateEnglish->json('version_id'))->toBe($englishVersion);
 
     $filipino = AiOperationUsage::query()->create([

@@ -6,6 +6,8 @@ use App\Jobs\PrepareLessonAudioForSubtitles;
 use App\Models\AiOperationUsage;
 use App\Models\Lesson;
 use App\Services\AiOperationService;
+use App\Services\ApprovedSubtitleService;
+use App\Services\SubtitleSrtCueService;
 use App\Services\WhisperxAlignmentService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -67,11 +69,13 @@ class AdminSubtitleWorkflowController extends Controller
                     'text' => $result['transcript_draft']['text'] ?? $result['text'] ?? '',
                     'approved' => ($result['transcript_review']['status'] ?? null) === 'approved',
                     'approved_at' => $result['transcript_review']['approved_at'] ?? null,
+                    'recovered_artifact' => ($result['recovery']['recovered_artifact'] ?? false) === true,
+                    'recovery_details' => $this->recoveryDetails($result['recovery'] ?? null),
                     'english_subtitles_approved' => is_string($approvedHash) && in_array($approvedHash, $approvedTranscriptHashes[$operation->id] ?? [], true),
                     'offset_seconds' => (float) ($operation->timeline_offset_seconds ?? 0),
                     'error_code' => $operation->error_code,
                     'error_message' => $operation->error_message,
-                    'queue' => $this->queueDetails($operation, (string) config('queue.default')),
+                    'queue' => $this->queueDetails($operation, (string) config('queue.default'), 600),
                 ];
             })->values(),
             'alignments' => $alignmentsByTranscript->map(function (AiOperationUsage $operation) use ($alignments): array {
@@ -81,6 +85,8 @@ class AdminSubtitleWorkflowController extends Controller
                     'transcript_operation_id' => $result['transcript_operation_id'] ?? null,
                     'download_version_id' => $result['subtitle_versions']['en']['current_approved_version_id'] ?? null,
                     'transcript_sha256' => $result['transcript_sha256'] ?? null,
+                    'recovered_artifact' => ($result['recovery']['recovered_artifact'] ?? false) === true,
+                    'recovery_details' => $this->recoveryDetails($result['recovery'] ?? null),
                     'queue' => $this->queueDetails($operation, 'whisperx'),
                 ];
             })->values(),
@@ -96,6 +102,10 @@ class AdminSubtitleWorkflowController extends Controller
                     'target_language' => $result['target_language'] ?? null,
                     'source_transcript_operation_id' => $result['source_transcript_operation_id'] ?? null,
                     'source_transcript_sha256' => $result['source_transcript_sha256'] ?? null,
+                    'source_alignment_operation_id' => $result['source_alignment_operation_id'] ?? null,
+                    'source_english_srt_version_id' => $result['source_english_srt_version_id'] ?? null,
+                    'cues' => $result['subtitle_draft']['cues'] ?? $result['translated_cues'] ?? [],
+                    'cue_timed' => is_string($result['subtitle_draft']['srt_path'] ?? null),
                     'approved' => ($result['approval_statuses']['fil'] ?? null) === 'approved',
                     'error_code' => $operation->error_code,
                     'error_message' => $operation->error_message,
@@ -161,12 +171,12 @@ class AdminSubtitleWorkflowController extends Controller
         return response()->json(['operation_id' => $usage->id, 'status' => 'queued', 'already_submitted' => false], 202);
     }
 
-    private function queueDetails(?AiOperationUsage $operation, string $connectionName): ?array
+    private function queueDetails(?AiOperationUsage $operation, string $connectionName, ?int $jobTimeout = null): ?array
     {
         if (!$operation) return null;
         $connection = config('queue.connections.'.$connectionName, []);
         $queueName = (string) ($connection['queue'] ?? 'default');
-        $workerTimeout = $connectionName === 'whisperx' ? max(3600, (int) config('whisperx.timeout', 7200)) : 120;
+        $workerTimeout = $connectionName === 'whisperx' ? max(3600, (int) config('whisperx.timeout', 7200)) : ($jobTimeout ?? 120);
         $workerTries = $connectionName === 'whisperx' ? 2 : 3;
         $waitSeconds = $operation->status === 'queued' && $operation->updated_at
             ? max(0, (int) $operation->updated_at->diffInSeconds(now())) : 0;
@@ -177,6 +187,16 @@ class AdminSubtitleWorkflowController extends Controller
             'waiting_seconds' => $waitSeconds,
             'worker_stalled' => $stalled,
             'worker_command' => 'php artisan queue:work '.$connectionName.' --queue='.$queueName.' --sleep=3 --tries='.$workerTries.' --timeout='.$workerTimeout,
+        ];
+    }
+
+    private function recoveryDetails(mixed $recovery): ?array
+    {
+        if (!is_array($recovery) || ($recovery['recovered_artifact'] ?? false) !== true) return null;
+        return [
+            'alignment_input_association' => $recovery['alignment_input_association'] ?? 'unverified',
+            'timeline_offset_status' => $recovery['timeline_offset_status'] ?? null,
+            'source_audio_candidates' => $recovery['source_audio_candidates'] ?? [],
         ];
     }
 
@@ -195,32 +215,41 @@ class AdminSubtitleWorkflowController extends Controller
         ], 200, ['Cache-Control' => 'private, no-store']);
     }
 
-    public function translate(Request $request, Lesson $lesson, int $transcript, WhisperxAlignmentService $alignments, AiOperationService $operations)
+    public function translate(Request $request, Lesson $lesson, int $transcript, WhisperxAlignmentService $alignments, AiOperationService $operations, ApprovedSubtitleService $subtitles, SubtitleSrtCueService $srt)
     {
         try {
+            $request->validate(['source_alignment_operation_id' => ['required', 'integer', 'min:1'], 'source_english_srt_version_id' => ['required', 'string', 'max:64']]);
             $source = $alignments->transcriptVersion($lesson, $transcript);
             $text = $alignments->approvedTranscriptText($source);
             $textHash = hash('sha256', $text);
-            $hasApprovedEnglishSubtitles = AiOperationUsage::query()
-                ->where('lesson_id', $lesson->id)
-                ->where('service', WhisperxAlignmentService::ALIGNMENT_SERVICE)
-                ->where('status', 'succeeded')
-                ->get()
-                ->contains(function (AiOperationUsage $alignment) use ($source, $textHash): bool {
-                    $result = is_array($alignment->result) ? $alignment->result : [];
-                    return (int) ($result['transcript_operation_id'] ?? 0) === (int) $source->id
-                        && ($result['transcript_sha256'] ?? null) === $textHash
-                        && ($result['approval_statuses']['en'] ?? null) === 'approved'
-                        && is_string($result['subtitle_versions']['en']['current_approved_version_id'] ?? null);
-                });
-            if (!$hasApprovedEnglishSubtitles) {
+            $alignmentId = $request->integer('source_alignment_operation_id');
+            $versionId = $request->string('source_english_srt_version_id')->toString();
+            $alignment = AiOperationUsage::query()->where('lesson_id', $lesson->id)
+                ->where('service', WhisperxAlignmentService::ALIGNMENT_SERVICE)->where('status', 'succeeded')->find($alignmentId);
+            $alignmentResult = is_array($alignment?->result) ? $alignment->result : [];
+            $currentVersionId = $alignmentResult['subtitle_versions']['en']['current_approved_version_id'] ?? null;
+            if (!$alignment || ($alignmentResult['approval_statuses']['en'] ?? null) !== 'approved'
+                || (int) ($alignmentResult['transcript_operation_id'] ?? 0) !== (int) $source->id
+                || ($alignmentResult['transcript_sha256'] ?? null) !== $textHash
+                || !is_string($versionId) || $versionId === '' || $versionId !== $currentVersionId) {
                 throw new RuntimeException('Approve the English subtitles aligned to this transcript before generating Filipino translation.');
             }
+            $approvedEnglish = $subtitles->approvedVersion($lesson, $alignment, 'en', $versionId);
+            $englishSrt = Storage::disk('local')->get($approvedEnglish['path']);
+            if (!hash_equals((string) $approvedEnglish['sha256'], hash('sha256', $englishSrt))) throw new RuntimeException('The approved English SRT failed its integrity check.');
+            $cues = $srt->parse($englishSrt);
             $assignment = $operations->assigned('translation')['integration'];
             if (!in_array(mb_strtolower((string) $assignment->target_language), ['fil', 'fil-ph', 'filipino'], true)) {
                 throw new RuntimeException('Set the translation assignment target language to Filipino before queueing subtitles.');
             }
-            $queued = $operations->queueTranslation($text, 'translate-'.$source->id.'-'.substr(hash('sha256', $text), 0, 32), $lesson->id, $source->id);
+            $sourceMetadata = [
+                'transcript_operation_id' => $source->id, 'transcript_sha256' => $textHash,
+                'alignment_operation_id' => $alignment->id, 'english_srt_version_id' => $versionId,
+                'english_srt_sha256' => $approvedEnglish['sha256'],
+            ];
+            $configHash = substr(hash('sha256', implode('|', [$assignment->ai_integration_id, $assignment->model, $assignment->target_language])), 0, 14);
+            $key = 'filcue-'.$alignment->id.'-'.substr($approvedEnglish['sha256'], 0, 16).'-'.$configHash;
+            $queued = $operations->queueSubtitleCueTranslation($cues, $sourceMetadata, $key, $lesson->id);
         } catch (RuntimeException $exception) {
             throw ValidationException::withMessages(['translation' => $exception->getMessage()]);
         }
@@ -235,7 +264,7 @@ class AdminSubtitleWorkflowController extends Controller
 
     public function saveTranslation(Request $request, Lesson $lesson, int $translation)
     {
-        $data = $request->validate(['text' => ['required', 'string', 'max:200000']]);
+        $data = $request->validate(['text' => ['nullable', 'string', 'max:200000'], 'cues' => ['nullable', 'array', 'min:1', 'max:10000'], 'cues.*.index' => ['required_with:cues', 'integer', 'min:1'], 'cues.*.text' => ['required_with:cues', 'string', 'max:10000']]);
         $operation = AiOperationUsage::query()->where('service', 'translation')->where('lesson_id', $lesson->id)->findOrFail($translation);
         $result = is_array($operation->result) ? $operation->result : [];
         if ($operation->status !== 'succeeded' || trim((string) ($result['text'] ?? '')) === '') {
@@ -245,14 +274,40 @@ class AdminSubtitleWorkflowController extends Controller
         if ($target !== '' && !in_array($target, ['fil', 'fil-ph', 'filipino'], true)) {
             throw ValidationException::withMessages(['text' => 'This translation does not target Filipino.']);
         }
-        if (trim($data['text']) === '') throw ValidationException::withMessages(['text' => 'The Filipino translation draft cannot be empty.']);
+        $cueDraft = $data['cues'] ?? null;
+        $hasTimedDraft = is_string($result['subtitle_draft']['srt_path'] ?? null) && is_array($result['translated_cues'] ?? null);
+        if ($hasTimedDraft && is_array($cueDraft)) {
+            try {
+                $sourceCues = $result['translated_cues'];
+                if (count($sourceCues) !== count($cueDraft)) throw new RuntimeException('Keep every translated cue in its original order.');
+                $edited = [];
+                foreach ($sourceCues as $index => $cue) {
+                    $item = $cueDraft[$index] ?? null;
+                    if (!is_array($item) || (int) ($item['index'] ?? 0) !== (int) $cue['index'] || !is_string($item['text'] ?? null) || trim($item['text']) === '') {
+                        throw new RuntimeException('Keep every translated cue in its original order and provide text for each cue.');
+                    }
+                    $cue['text'] = $item['text']; $edited[] = $cue;
+                }
+                $text = implode("\n", array_column($edited, 'text'));
+                $path = $result['subtitle_draft']['srt_path'];
+                $rendered = app(SubtitleSrtCueService::class)->render($edited);
+                if (!Storage::disk('local')->put($path, $rendered)) throw new RuntimeException('The Filipino SRT draft could not be saved privately.');
+                $result['translated_cues'] = $edited;
+                $result['subtitle_draft']['cues'] = $edited;
+                $result['subtitle_draft']['srt_sha256'] = hash('sha256', $rendered);
+            } catch (RuntimeException $exception) { throw ValidationException::withMessages(['cues' => $exception->getMessage()]); }
+        } else {
+            $text = $data['text'] ?? '';
+            if (trim($text) === '') throw ValidationException::withMessages(['text' => 'The Filipino translation draft cannot be empty.']);
+        }
         $result['subtitle_draft'] = [
-            'text' => $data['text'], 'sha256' => hash('sha256', $data['text']),
+            ...($result['subtitle_draft'] ?? []),
+            'text' => $text, 'sha256' => hash('sha256', $text),
             'updated_by' => $request->user()->id, 'updated_at' => now()->toIso8601String(),
         ];
         $result['approval_statuses']['fil'] = 'pending_review';
         $operation->result = $result;
         $operation->save();
-        return response()->json(['operation_id' => $operation->id, 'text' => $data['text']], 200, ['Cache-Control' => 'private, no-store']);
+        return response()->json(['operation_id' => $operation->id, 'text' => $text, 'cues' => $result['subtitle_draft']['cues'] ?? null], 200, ['Cache-Control' => 'private, no-store']);
     }
 }

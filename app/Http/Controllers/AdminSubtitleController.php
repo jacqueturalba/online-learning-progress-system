@@ -25,7 +25,7 @@ class AdminSubtitleController extends Controller
     {
         $request->validate([
             'srt_file' => ['nullable', 'file', 'max:5120'],
-            'srt_text' => ['nullable', 'string', 'max:5000000', 'prohibited_with:srt_file'],
+            'srt_text' => ['nullable', 'string', 'max:5000000', 'prohibits:srt_file'],
         ]);
         $usage = AiOperationUsage::query()->findOrFail($operation);
         try {

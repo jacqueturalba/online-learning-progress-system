@@ -361,6 +361,7 @@ button, a, input { -webkit-tap-highlight-color: transparent; }
 .subtitle-workflow-section { display: grid; gap: 14px; }
 .subtitle-workflow-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .subtitle-worker-warning { padding: 12px 14px; border: 1px solid #f2c48f; border-radius: 10px; background: #fff7ed; color: #9a3412; }
+.subtitle-recovery-note { color: #9a3412; }
 .subtitle-operation-row { display: grid; gap: 10px; padding: 14px 0; border-top: 1px solid var(--border); }
 .subtitle-operation-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .subtitle-operation-row textarea { width: 100%; min-height: 120px; box-sizing: border-box; font: inherit; }
@@ -740,3 +741,10 @@ small { font-size: max(12px, 1em); }
 .enrollment-revision blockquote strong{font-size:.82rem;color:#762b25}
 .enrollment-revision blockquote span{white-space:pre-line;font-size:.92rem}
 .enrollment-revision>button{flex:none;background:#8c302b;color:#fff}
+
+.closed-caption-control{display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:10px;color:var(--text-secondary);font-size:13px}
+.closed-caption-control label{font-weight:650}
+.closed-caption-control select{min-width:150px;min-height:40px;padding:7px 32px 7px 11px;border:1px solid var(--border);border-radius:7px;background:var(--surface);color:var(--text-primary);font:inherit}
+.closed-caption-control select:focus-visible{outline:3px solid color-mix(in srgb,var(--primary) 55%,transparent);outline-offset:2px}
+.video::cue{color:#fff;background-color:rgb(0 0 0 / 78%);font-size:1.05em;text-shadow:0 1px 2px #000}
+@media(max-width:520px){.closed-caption-control{justify-content:space-between;gap:8px}.closed-caption-control select{flex:1;max-width:58%}.video::cue{font-size:.95em}}

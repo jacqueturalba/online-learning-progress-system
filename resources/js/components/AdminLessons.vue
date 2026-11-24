@@ -19,6 +19,8 @@ const workflowWarning = ref('');
 const workflowLoading = ref(false);
 const transcriptDrafts = reactive<Record<number, string>>({}), translationDrafts = reactive<Record<number, string>>({}), alignmentSrtDrafts = reactive<Record<number, string>>({});
 const transcriptServerValues = reactive<Record<number, string>>({}), translationServerValues = reactive<Record<number, string>>({});
+type FilipinoCue = { index: number; start: string; end: string; text: string };
+const translationCueDrafts = reactive<Record<number, FilipinoCue[]>>({}), translationCueServerValues = reactive<Record<number, string>>({});
 let subtitlePoll: ReturnType<typeof setTimeout> | null = null;
 let subtitlePollFailures = 0;
 const SUBTITLE_POLL_INTERVAL_MS = 10_000;
@@ -162,6 +164,13 @@ async function refreshSubtitleWorkspace(manual = true) {
     }
     for (const translation of workflow.translations || []) {
       reconcileServerDraft(translationDrafts, translationServerValues, translation.operation_id, translation.text || '');
+      if (Array.isArray(translation.cues) && translation.cues.length) {
+        const server = JSON.stringify(translation.cues);
+        if (translationCueDrafts[translation.operation_id] === undefined || translationCueServerValues[translation.operation_id] === JSON.stringify(translationCueDrafts[translation.operation_id])) {
+          translationCueDrafts[translation.operation_id] = structuredClone(translation.cues);
+        }
+        translationCueServerValues[translation.operation_id] = server;
+      }
     }
     for (const alignment of workflow.alignments || []) {
       if (alignment.status === 'succeeded' && alignmentSrtDrafts[alignment.operation_id] === undefined) {
@@ -235,26 +244,31 @@ async function approveEnglishSubtitle(alignmentId: number) {
     await refreshSubtitleWorkspace();
   } catch (caught) { workflowError.value = (caught as Error).message; }
 }
-async function generateFilipinoTranslation(transcriptId: number) {
+async function generateFilipinoTranslation(transcriptId: number, alignmentId: number, versionId: string) {
   if (!subtitleLesson.value) return;
   if (!window.confirm('Queue a Filipino translation from the approved English transcript? The assigned provider may charge for translation.')) return;
   workflowBusy.value = true; workflowError.value = '';
-  try { await request(`/api/admin/lessons/${subtitleLesson.value.id}/transcripts/${transcriptId}/translate`, 'POST', {}); await refreshSubtitleWorkspace(); }
+  try { await request(`/api/admin/lessons/${subtitleLesson.value.id}/transcripts/${transcriptId}/translate`, 'POST', { source_alignment_operation_id: alignmentId, source_english_srt_version_id: versionId }); await refreshSubtitleWorkspace(); }
   catch (caught) { workflowError.value = (caught as Error).message; }
   finally { workflowBusy.value = false; }
 }
 async function saveFilipinoTranslation(translationId: number) {
   if (!subtitleLesson.value) return;
-  try { await request(`/api/admin/lessons/${subtitleLesson.value.id}/translations/${translationId}/draft`, 'PUT', { text: translationDrafts[translationId] }); await refreshSubtitleWorkspace(); }
+  try {
+    const cues = translationCueDrafts[translationId];
+    await request(`/api/admin/lessons/${subtitleLesson.value.id}/translations/${translationId}/draft`, 'PUT', cues?.length ? { cues: cues.map(({ index, text }) => ({ index, text })) } : { text: translationDrafts[translationId] });
+    await refreshSubtitleWorkspace();
+  }
   catch (caught) { workflowError.value = (caught as Error).message; }
 }
 async function approveFilipinoSubtitle(translationId: number) {
   if (!subtitleLesson.value) return;
   const file = subtitleFiles[translationId];
-  if (!file) { workflowError.value = 'Choose a timed Filipino .SRT file to approve.'; return; }
-  const body = new FormData(); body.append('srt_file', file);
+  const body = file ? new FormData() : {};
+  if (file && body instanceof FormData) body.append('srt_file', file);
   try {
-    await request(`/api/admin/lessons/${subtitleLesson.value.id}/translations/${translationId}/draft`, 'PUT', { text: translationDrafts[translationId] });
+    const cues = translationCueDrafts[translationId];
+    await request(`/api/admin/lessons/${subtitleLesson.value.id}/translations/${translationId}/draft`, 'PUT', cues?.length ? { cues: cues.map(({ index, text }) => ({ index, text })) } : { text: translationDrafts[translationId] });
     await request(`/api/admin/lessons/${subtitleLesson.value.id}/subtitles/${translationId}/fil/approve`, 'POST', body);
     delete subtitleFiles[translationId]; workflowNotice.value = 'Filipino subtitle version approved.'; await refreshSubtitleWorkspace();
   } catch (caught) { workflowError.value = (caught as Error).message; }
@@ -290,13 +304,14 @@ onUnmounted(stopSubtitlePolling);
         <article v-for="transcript in subtitleWorkflow.transcripts" :key="transcript.operation_id" class="subtitle-operation-row">
           <div class="subtitle-operation-heading"><strong>Transcript #{{ transcript.operation_id }}</strong><span class="category-state" :class="transcript.approved ? 'available' : transcript.status === 'failed' ? 'unavailable' : 'archived'">{{ transcript.approved ? 'Approved' : transcript.status === 'succeeded' ? 'Pending review' : transcript.status }}</span></div>
           <small>Timeline offset {{ Number(transcript.offset_seconds || 0).toFixed(3) }} seconds</small>
+          <small v-if="transcript.recovered_artifact" class="subtitle-recovery-note">Recovered from existing private files. This is a new draft awaiting review. Historical alignment input association is unverified.</small>
+          <small v-if="transcript.recovered_artifact" v-for="candidate in transcript.recovery_details?.source_audio_candidates || []" :key="candidate.sha256" class="muted">Audio candidate {{ candidate.path }} · SHA-256 {{ candidate.sha256 }}</small>
           <p v-if="transcript.error_message" class="student-error">{{ transcript.error_message }}</p>
           <textarea v-model="transcriptDrafts[transcript.operation_id]" :disabled="transcript.status !== 'succeeded'" rows="5" aria-label="English transcript draft"></textarea>
           <div class="subtitle-actions">
             <button class="secondary-button" type="button" :disabled="transcript.status !== 'succeeded'" @click="saveEnglishTranscript(transcript.operation_id)">Save transcript draft</button>
             <button class="secondary-button" type="button" :disabled="transcript.status !== 'succeeded' || transcript.approved" @click="approveEnglishTranscript(transcript.operation_id)">Approve English transcript</button>
             <button class="secondary-button" type="button" :disabled="!transcript.approved || workflowBusy" @click="alignEnglishTranscript(transcript.operation_id)">Align with WhisperX</button>
-            <button class="secondary-button" type="button" :disabled="!transcript.english_subtitles_approved || workflowBusy" @click="generateFilipinoTranslation(transcript.operation_id)">Generate Filipino translation</button>
           </div>
         </article>
       </section>
@@ -307,8 +322,10 @@ onUnmounted(stopSubtitlePolling);
         <article v-for="alignment in subtitleWorkflow.alignments" :key="alignment.operation_id" class="subtitle-operation-row">
           <div class="subtitle-operation-heading"><strong>Alignment #{{ alignment.operation_id }}</strong><span class="category-state" :class="alignment.approved ? 'available' : alignment.status === 'failed' ? 'unavailable' : 'archived'">{{ alignment.approved ? 'Approved' : alignment.status === 'succeeded' ? 'Pending subtitle review' : alignment.status }}</span></div>
           <p v-if="alignment.error_message" class="student-error">{{ alignment.error_message }}</p>
+          <small v-if="alignment.recovered_artifact" class="subtitle-recovery-note">Recovered alignment draft. Historical audio input association is unverified; timestamps are relative to the supplied chunk with no original lesson offset applied.</small>
           <textarea v-if="alignment.status === 'succeeded'" v-model="alignmentSrtDrafts[alignment.operation_id]" rows="8" aria-label="English SRT review draft"></textarea>
           <button v-if="alignment.status === 'succeeded'" class="secondary-button" type="button" @click="approveEnglishSubtitle(alignment.operation_id)">{{ alignment.approved ? 'Approve revised English SRT' : 'Approve English SRT' }}</button>
+          <button v-if="alignment.approved && alignment.download_version_id && alignment.transcript_operation_id" class="secondary-button" type="button" :disabled="workflowBusy" @click="generateFilipinoTranslation(alignment.transcript_operation_id, alignment.operation_id, alignment.download_version_id)">Translate this approved English SRT into Filipino</button>
         </article>
       </section>
 
@@ -319,13 +336,20 @@ onUnmounted(stopSubtitlePolling);
           <div class="subtitle-operation-heading"><strong>Translation #{{ translation.operation_id }}</strong><span class="category-state" :class="translation.approved ? 'available' : translation.status === 'failed' ? 'unavailable' : 'archived'">{{ translation.approved ? 'Approved' : translation.status === 'succeeded' ? 'Pending review' : translation.status }}</span></div>
           <small>Target language: {{ translation.target_language || 'Filipino (legacy target)' }}</small>
           <p v-if="translation.error_message" class="student-error">{{ translation.error_message }}</p>
-          <textarea v-model="translationDrafts[translation.operation_id]" :disabled="translation.status !== 'succeeded'" rows="5" aria-label="Filipino translation draft"></textarea>
+          <div v-if="translation.cues?.length" class="filipino-cue-review">
+            <label v-for="(cue, cueIndex) in translationCueDrafts[translation.operation_id] || translation.cues" :key="cue.index" class="filipino-cue-row">
+              <small>{{ cue.index }} · {{ cue.start }} → {{ cue.end }}</small>
+              <textarea v-model="translationCueDrafts[translation.operation_id][cueIndex].text" :disabled="translation.status !== 'succeeded'" rows="2" :aria-label="`Filipino cue ${cue.index}`"></textarea>
+            </label>
+          </div>
+          <textarea v-else v-model="translationDrafts[translation.operation_id]" :disabled="translation.status !== 'succeeded'" rows="5" aria-label="Filipino translation draft"></textarea>
           <div class="subtitle-actions">
             <button class="secondary-button" type="button" :disabled="translation.status !== 'succeeded'" @click="saveFilipinoTranslation(translation.operation_id)">Save Filipino draft</button>
-            <label>Timed Filipino SRT<input type="file" accept=".srt,application/x-subrip,text/plain" :aria-label="`Filipino SRT for translation ${translation.operation_id}`" @change="chooseSubtitleFile(translation.operation_id, $event)"></label>
-            <button class="secondary-button" type="button" :disabled="translation.status !== 'succeeded' || !subtitleFiles[translation.operation_id]" @click="approveFilipinoSubtitle(translation.operation_id)">{{ translation.approved ? 'Approve revised Filipino SRT' : 'Approve Filipino SRT' }}</button>
+            <label>Optional timed Filipino SRT override<input type="file" accept=".srt,application/x-subrip,text/plain" :aria-label="`Filipino SRT for translation ${translation.operation_id}`" @change="chooseSubtitleFile(translation.operation_id, $event)"></label>
+            <button class="secondary-button" type="button" :disabled="translation.status !== 'succeeded'" @click="approveFilipinoSubtitle(translation.operation_id)">{{ translation.approved ? 'Approve revised Filipino SRT' : 'Approve Filipino subtitles' }}</button>
           </div>
-          <small>Uploaded SRT cue text must match the reviewed translation exactly. Timing is not generated from text-only translation results.</small>
+          <small v-if="translation.cue_timed">Cue order and timestamps are inherited from the exact approved English SRT version.</small>
+          <small v-else>Legacy text-only translations require a timed SRT upload before approval.</small>
         </article>
       </section>
 
