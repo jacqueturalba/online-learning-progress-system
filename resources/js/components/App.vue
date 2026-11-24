@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { BookOpen, ChartNoAxesColumnIncreasing, Check, ChevronRight, CirclePlay, ClipboardCheck, Clock3, FileText, FolderTree, GraduationCap, House, LayoutDashboard, LogOut, Menu, Play, Settings, UserRound, UsersRound, Video, X } from '@lucide/vue';
 import AdminDashboard from './AdminDashboard.vue';
 import AdminStudents from './AdminStudents.vue';
@@ -54,6 +54,20 @@ const enrollment = ref<{eligible:boolean;requirement_enabled:boolean;category_na
 const user = ref<User | null>(null), categories = ref<Category[]>([]), loading = ref(true), error = ref(''), notice = ref(''), playbackError = ref(''), navigationNotice = ref(''), autoplayBlocked = ref(false), replayRequired = ref(false), selected = ref<Lesson | null>(null), navOpen = ref(false), loginMode = ref(location.pathname !== '/register'), resetMode = ref(false), lessonPages = ref<Record<number, number>>({}), realizationText = ref(''), realizationNotice = ref(''), realizationError = ref(''), realizationSaving = ref(false);
 const lessonVideo = ref<HTMLVideoElement | null>(null);
 const selectedSubtitleLanguage = ref<'off' | 'en' | 'fil'>('off');
+const lastSelectedSubtitleLanguage = ref<'en' | 'fil'>('en');
+function synchronizeSubtitleSelection() {
+  const tracks = Array.from(lessonVideo.value?.textTracks ?? []);
+  const showing = tracks.find(track => track.mode === 'showing' && (track.language === 'en' || track.language === 'fil'));
+  selectedSubtitleLanguage.value = showing?.language === 'en' || showing?.language === 'fil' ? showing.language : 'off';
+  if (showing && (showing.language === 'en' || showing.language === 'fil')) lastSelectedSubtitleLanguage.value = showing.language;
+  for (const track of tracks) {
+    if (track !== showing && track.mode !== 'hidden') track.mode = 'hidden';
+  }
+}
+watch(lessonVideo, (video, previous) => {
+  previous?.textTracks.removeEventListener('change', synchronizeSubtitleSelection);
+  video?.textTracks.addEventListener('change', synchronizeSubtitleSelection);
+});
 const isPublicLanding = computed(() => location.pathname === '/' && !location.search.includes('auth=') && !resetToken.value);
 const adminSection = ref<AdminSection>(getAdminSection());
 const lessonView = ref<'grid' | 'list'>('grid');
@@ -214,20 +228,45 @@ async function loadSubtitleTracks(lessonId: number) {
       ? response.tracks.filter((track: SubtitleTrack) => ['en', 'fil'].includes(track.language) && typeof track.url === 'string')
       : [];
     selected.value = { ...selected.value, subtitle_tracks: tracks };
+    await nextTick();
+    if (selected.value?.id !== lessonId || !lessonVideo.value) return;
+    for (const element of Array.from(lessonVideo.value.querySelectorAll<HTMLTrackElement>('track[kind="subtitles"]'))) {
+      const textTrack = element.track;
+      if (element.readyState !== HTMLTrackElement.ERROR && textTrack.mode !== 'hidden' && textTrack.mode !== 'showing') textTrack.mode = 'hidden';
+    }
   } catch {
     // Subtitle availability must not prevent a student from watching the video.
   }
 }
 async function changeSubtitleLanguage(event: Event) {
-  selectedSubtitleLanguage.value = (event.target as HTMLSelectElement).value as 'off' | 'en' | 'fil';
+  const language = (event.target as HTMLSelectElement).value as 'off' | 'en' | 'fil';
+  selectedSubtitleLanguage.value = language;
+  if (language === 'en' || language === 'fil') lastSelectedSubtitleLanguage.value = language;
+  await applySubtitleLanguage();
+}
+async function toggleSubtitleCaptions() {
+  if (selectedSubtitleLanguage.value === 'off') {
+    const available = selected.value?.subtitle_tracks?.map(track => track.language) ?? [];
+    selectedSubtitleLanguage.value = available.includes(lastSelectedSubtitleLanguage.value)
+      ? lastSelectedSubtitleLanguage.value
+      : available[0] ?? 'off';
+    if (selectedSubtitleLanguage.value === 'en' || selectedSubtitleLanguage.value === 'fil') lastSelectedSubtitleLanguage.value = selectedSubtitleLanguage.value;
+  } else {
+    lastSelectedSubtitleLanguage.value = selectedSubtitleLanguage.value;
+    selectedSubtitleLanguage.value = 'off';
+  }
+  await applySubtitleLanguage();
+}
+async function applySubtitleLanguage() {
   await nextTick();
   const video = lessonVideo.value;
   if (!video) return;
   for (const track of Array.from(video.textTracks)) {
     track.mode = selectedSubtitleLanguage.value !== 'off' && track.language === selectedSubtitleLanguage.value
       ? 'showing'
-      : 'disabled';
+      : 'hidden';
   }
+  synchronizeSubtitleSelection();
 }
 function clearPlaybackRenewal() {
   if (playbackRenewalTimer) clearTimeout(playbackRenewalTimer);
@@ -498,6 +537,6 @@ onMounted(() => {
         <StudentZoom v-else-if="studentPage === 'zoom'" /><StudentProfile v-else :user="user" :enrollment-eligible="enrollment.eligible" @enrollment-submitted="enrollment.status = $event; enrollment.revision_reason = null" />
       </div>
     </section>
-    <div v-if="selected" class="modal-backdrop" @click.self="closeLesson"><section class="lesson-modal"><button class="modal-close" aria-label="Close lesson" @click="closeLesson"><X :size="19" /></button><p class="eyebrow">LESSON</p><h2>{{ selected.title }}</h2><p class="muted">{{ selected.description || 'Take your time and enjoy this lesson.' }}</p><div v-if="selected.video_stream_url" class="video-player-surface" @contextmenu.prevent><video ref="lessonVideo" class="video" controls controlsList="nodownload" disablePictureInPicture playsinline referrerpolicy="same-origin" :src="selected.video_stream_url" :data-lesson-id="selected.id" @contextmenu.prevent @loadedmetadata="resumePlayback($event, selected.id)" @play="handlePlay($event, selected.id)" @pause="handlePause($event, selected.id)" @timeupdate="handleTimeUpdate($event, selected.id)" @ended="handleEnded($event, selected.id)"><track v-for="track in selected.subtitle_tracks || []" :key="track.language" kind="subtitles" :srclang="track.language" :label="track.label" :src="track.url"></video></div><div v-else class="video-placeholder"><CirclePlay :size="38" /><span>{{ selected.has_video ? (playbackInitializing ? 'Preparing your lesson video…' : 'Lesson video access is unavailable.') : 'This lesson’s video hasn’t been added yet.' }}</span></div><div v-if="selected.video_stream_url && selected.subtitle_tracks?.length" class="closed-caption-control"><label for="lesson-closed-captions">Closed captions (CC)</label><select id="lesson-closed-captions" :value="selectedSubtitleLanguage" @change="changeSubtitleLanguage"><option value="off">Off</option><option v-for="track in selected.subtitle_tracks" :key="track.language" :value="track.language">{{ track.label }}</option></select></div><p v-if="playbackError" class="error playback-error" role="status">{{ playbackError }}</p><p v-if="navigationNotice" class="lesson-navigation-notice" role="status">{{ navigationNotice }}</p><button v-if="autoplayBlocked" class="primary continue-button" @click="continueAfterAutoplayBlock">Continue lesson <Play :size="16" fill="currentColor" /></button><button v-if="replayRequired" class="primary continue-button" @click="replayLesson">Replay lesson <Play :size="16" fill="currentColor" /></button><form v-if="!selected.realization_submitted" class="student-realization-form" @submit.prevent="submitRealization"><label for="student-realization">What is your take away from this lesson?</label><textarea id="student-realization" v-model="realizationText" maxlength="20000" required minlength="3" rows="3" placeholder="Write a short reflection or describe what you practiced."></textarea><p v-if="realizationNotice" class="success" role="status">{{ realizationNotice }}</p><p v-if="realizationError" class="error" role="alert">{{ realizationError }}</p><button class="primary" :disabled="realizationSaving">{{ realizationSaving ? 'Saving…' : 'Save realization' }}</button></form><p v-else class="success realization-saved" role="status">Your realization has been saved.</p><div class="modal-footer"><span><Clock3 :size="16" /> {{ formatTime(selected.duration_seconds) }}</span><span v-if="selected.progress?.is_completed" class="completed-pill"><Check :size="16" /> Lesson complete</span></div><div class="lesson-navigation"><button type="button" class="secondary-button" :disabled="!previousLesson" @click="previousLesson && watchLesson(previousLesson, false)">Previous Lesson</button><p v-if="nextLessonCandidate && !selected.progress?.is_completed" class="lesson-navigation-help">Watch at least 50% of this lesson to unlock the next lesson.</p><p v-else-if="nextLessonCandidate && !selected.realization_submitted" class="lesson-navigation-help">Submit your realization above before proceeding to the next lesson.</p><button type="button" class="primary" :disabled="!selected.progress?.is_completed || !selected.realization_submitted || !nextLesson" @click="nextLesson && watchLesson(nextLesson, false)">Next Lesson</button></div></section></div>
+    <div v-if="selected" class="modal-backdrop" @click.self="closeLesson"><section class="lesson-modal"><button class="modal-close" aria-label="Close lesson" @click="closeLesson"><X :size="19" /></button><p class="eyebrow">LESSON</p><h2>{{ selected.title }}</h2><p class="muted">{{ selected.description || 'Take your time and enjoy this lesson.' }}</p><div v-if="selected.video_stream_url" class="video-player-surface" @contextmenu.prevent><video ref="lessonVideo" class="video" controls controlsList="nodownload" disablePictureInPicture playsinline referrerpolicy="same-origin" :src="selected.video_stream_url" :data-lesson-id="selected.id" @contextmenu.prevent @loadedmetadata="resumePlayback($event, selected.id)" @play="handlePlay($event, selected.id)" @pause="handlePause($event, selected.id)" @timeupdate="handleTimeUpdate($event, selected.id)" @ended="handleEnded($event, selected.id)"><track v-for="track in selected.subtitle_tracks || []" :key="track.language" kind="subtitles" :srclang="track.language" :label="track.label" :src="track.url"></video></div><div v-else class="video-placeholder"><CirclePlay :size="38" /><span>{{ selected.has_video ? (playbackInitializing ? 'Preparing your lesson video…' : 'Lesson video access is unavailable.') : 'This lesson’s video hasn’t been added yet.' }}</span></div><div v-if="selected.video_stream_url && selected.subtitle_tracks?.length" class="closed-caption-control"><button type="button" class="cc-toggle" :aria-pressed="selectedSubtitleLanguage !== 'off'" @click="toggleSubtitleCaptions">CC <span>{{ selectedSubtitleLanguage === 'off' ? 'Off' : 'On' }}</span></button><label for="lesson-closed-captions">Language</label><select id="lesson-closed-captions" :value="selectedSubtitleLanguage" @change="changeSubtitleLanguage"><option value="off">Off</option><option v-for="track in selected.subtitle_tracks" :key="track.language" :value="track.language">{{ track.label }}</option></select></div><p v-if="playbackError" class="error playback-error" role="status">{{ playbackError }}</p><p v-if="navigationNotice" class="lesson-navigation-notice" role="status">{{ navigationNotice }}</p><button v-if="autoplayBlocked" class="primary continue-button" @click="continueAfterAutoplayBlock">Continue lesson <Play :size="16" fill="currentColor" /></button><button v-if="replayRequired" class="primary continue-button" @click="replayLesson">Replay lesson <Play :size="16" fill="currentColor" /></button><form v-if="!selected.realization_submitted" class="student-realization-form" @submit.prevent="submitRealization"><label for="student-realization">What is your take away from this lesson?</label><textarea id="student-realization" v-model="realizationText" maxlength="20000" required minlength="3" rows="3" placeholder="Write a short reflection or describe what you practiced."></textarea><p v-if="realizationNotice" class="success" role="status">{{ realizationNotice }}</p><p v-if="realizationError" class="error" role="alert">{{ realizationError }}</p><button class="primary" :disabled="realizationSaving">{{ realizationSaving ? 'Saving…' : 'Save realization' }}</button></form><p v-else class="success realization-saved" role="status">Your realization has been saved.</p><div class="modal-footer"><span><Clock3 :size="16" /> {{ formatTime(selected.duration_seconds) }}</span><span v-if="selected.progress?.is_completed" class="completed-pill"><Check :size="16" /> Lesson complete</span></div><div class="lesson-navigation"><button type="button" class="secondary-button" :disabled="!previousLesson" @click="previousLesson && watchLesson(previousLesson, false)">Previous Lesson</button><p v-if="nextLessonCandidate && !selected.progress?.is_completed" class="lesson-navigation-help">Watch at least 50% of this lesson to unlock the next lesson.</p><p v-else-if="nextLessonCandidate && !selected.realization_submitted" class="lesson-navigation-help">Submit your realization above before proceeding to the next lesson.</p><button type="button" class="primary" :disabled="!selected.progress?.is_completed || !selected.realization_submitted || !nextLesson" @click="nextLesson && watchLesson(nextLesson, false)">Next Lesson</button></div></section></div>
   </div>
 </template>
