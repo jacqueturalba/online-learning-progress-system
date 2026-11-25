@@ -110,6 +110,54 @@ it('moves preparation through processing to completed without calling a provider
         ->and($operation->fresh()->result['processing_completed_at'])->not->toBeEmpty();
 });
 
+it('returns transcripts chronologically and serves their shared private full-length audio with ranges to admins only', function () {
+    Storage::fake('local');
+    config(['ai_media.temp_directory' => 'ai-audio-preparation']);
+    $lesson = subtitleWorkflowLesson();
+    $admin = subtitleWorkflowUser('admin');
+    $student = subtitleWorkflowUser('student');
+    $workspace = 'ai-audio-preparation/'.str()->uuid();
+    $audioPath = $workspace.'/audio.mp3';
+    $firstChunk = $workspace.'/chunk-001.mp3';
+    $secondChunk = $workspace.'/chunk-002.mp3';
+    Storage::disk('local')->put($audioPath, '0123456789');
+    Storage::disk('local')->put($firstChunk, 'first chunk');
+    Storage::disk('local')->put($secondChunk, 'second chunk');
+    $preparation = AiOperationUsage::query()->create([
+        'service' => 'audio_preparation', 'model' => 'ffmpeg-local', 'lesson_id' => $lesson->id,
+        'status' => 'succeeded', 'idempotency_key' => 'audio-prep-player-'.str()->uuid(),
+        'request_fingerprint' => hash('sha256', 'prepared'), 'result' => ['preparation' => [
+            'workspace' => $workspace, 'audio_path' => $audioPath, 'timeline_start_seconds' => 5.5,
+            'duration_seconds' => 90, 'chunks' => [
+                ['path' => $firstChunk, 'offset_seconds' => 5.5], ['path' => $secondChunk, 'offset_seconds' => 50],
+            ],
+        ]],
+    ]);
+    $later = AiOperationUsage::query()->create([
+        'service' => 'transcription', 'model' => 'whisper-1', 'lesson_id' => $lesson->id,
+        'timeline_offset_seconds' => 45, 'status' => 'succeeded', 'idempotency_key' => 'transcript-middle-'.str()->uuid(),
+        'request_fingerprint' => hash('sha256', 'middle'), 'result' => ['text' => 'Middle', 'prepared_audio_path' => $secondChunk],
+    ]);
+    $earlier = AiOperationUsage::query()->create([
+        'service' => 'transcription', 'model' => 'whisper-1', 'lesson_id' => $lesson->id,
+        'timeline_offset_seconds' => 5.5, 'status' => 'succeeded', 'idempotency_key' => 'transcript-opening-'.str()->uuid(),
+        'request_fingerprint' => hash('sha256', 'opening'), 'result' => ['text' => 'Opening', 'prepared_audio_path' => $firstChunk],
+    ]);
+    $later->forceFill(['created_at' => now()->subDays(2)])->saveQuietly();
+    $earlier->forceFill(['created_at' => now()])->saveQuietly();
+
+    $this->actingAs($admin)->getJson('/api/admin/lessons/'.$lesson->id.'/subtitle-workflow')
+        ->assertOk()->assertJsonPath('transcripts.0.operation_id', $earlier->id)
+        ->assertJsonPath('transcripts.1.operation_id', $later->id)
+        ->assertJsonPath('transcripts.0.audio.timeline_start_seconds', 5.5)
+        ->assertJsonPath('transcripts.0.audio.url', '/api/admin/lessons/'.$lesson->id.'/subtitle-audio/'.$preparation->id);
+
+    $this->get('/api/admin/lessons/'.$lesson->id.'/subtitle-audio/'.$preparation->id, ['Range' => 'bytes=2-5'])
+        ->assertStatus(206)->assertHeader('Accept-Ranges', 'bytes')->assertHeader('Content-Range', 'bytes 2-5/10')
+        ->assertHeader('Content-Length', '4');
+    $this->actingAs($student)->get('/api/admin/lessons/'.$lesson->id.'/subtitle-audio/'.$preparation->id)->assertForbidden();
+});
+
 it('records preparation failures and marks the operation failed after retries are exhausted', function () {
     $lesson = subtitleWorkflowLesson();
     $operation = AiOperationUsage::query()->create([

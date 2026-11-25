@@ -361,6 +361,10 @@ button, a, input { -webkit-tap-highlight-color: transparent; }
 .subtitle-workflow-section { display: grid; gap: 14px; }
 .subtitle-workflow-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .subtitle-worker-warning { padding: 12px 14px; border: 1px solid #f2c48f; border-radius: 10px; background: #fff7ed; color: #9a3412; }
+.subtitle-shared-audio { position: sticky; top: 8px; z-index: 6; display: grid; gap: 8px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.subtitle-shared-audio-controls { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.subtitle-shared-audio-controls audio { flex: 1; width: 100%; min-width: 0; }
+.subtitle-audio-seek { justify-self: start; }
 .subtitle-recovery-note { color: #9a3412; }
 .subtitle-operation-row { display: grid; gap: 10px; padding: 14px 0; border-top: 1px solid var(--border); }
 .subtitle-operation-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -369,7 +373,7 @@ button, a, input { -webkit-tap-highlight-color: transparent; }
 .subtitle-long-editor:focus { outline: 0; border-color: var(--brand-blue); box-shadow: var(--focus-ring); }
 .english-transcript-editor { min-height: 52vh; }
 .filipino-legacy-editor { min-height: 52vh; }
-.subtitle-editor-toolbar { position: sticky; top: 0; z-index: 5; display: grid; grid-template-columns: minmax(230px, 1fr) minmax(220px, auto); gap: 12px 18px; align-items: center; margin: 0 -10px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: 0 5px 18px rgb(15 23 42 / 9%); }
+.subtitle-editor-toolbar { position: sticky; top: 160px; z-index: 5; display: grid; grid-template-columns: minmax(230px, 1fr) minmax(220px, auto); gap: 12px 18px; align-items: center; margin: 0 -10px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: 0 5px 18px rgb(15 23 42 / 9%); }
 .subtitle-editor-context { display: grid; gap: 5px; min-width: 0; color: var(--text-primary); }
 .subtitle-editor-context strong { font-size: 16px; line-height: 1.35; overflow-wrap: anywhere; }
 .subtitle-editor-context small { color: var(--text-secondary); font-size: 13px; }

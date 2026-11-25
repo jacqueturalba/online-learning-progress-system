@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, reactive, ref } from 'vue';
+import { nextTick, onMounted, onUnmounted, reactive, ref } from 'vue';
 import { subtitleWorkflowPollingState } from '../utils/subtitlePolling';
 import { reconcileServerDraft } from '../utils/subtitleDrafts';
 import { parseSubtitleSrt, renderSubtitleSrt, subtitleSections, type SubtitleCue, type SubtitleSection } from '../utils/subtitleEditor';
@@ -19,6 +19,8 @@ const subtitleLesson = ref<Lesson | null>(null), subtitleWorkflow = ref<Subtitle
 const workflowNotice = ref('');
 const workflowWarning = ref('');
 const workflowLoading = ref(false);
+const transcriptAudio = ref<HTMLAudioElement | null>(null), transcriptAudioUrl = ref(''), transcriptAudioLoading = ref(false), transcriptAudioError = ref('');
+let pendingTranscriptAudioSeek: number | null = null;
 const transcriptDrafts = reactive<Record<number, string>>({}), translationDrafts = reactive<Record<number, string>>({}), alignmentSrtDrafts = reactive<Record<number, string>>({});
 const transcriptServerValues = reactive<Record<number, string>>({}), translationServerValues = reactive<Record<number, string>>({});
 const translationCueDrafts = reactive<Record<number, SubtitleCue[]>>({}), translationCueServerValues = reactive<Record<number, string>>({});
@@ -212,6 +214,36 @@ function stopSubtitlePolling() {
   if (subtitlePoll) clearTimeout(subtitlePoll);
   subtitlePoll = null;
 }
+function selectTranscriptAudio(transcript: any) {
+  if (!transcript.audio?.url) {
+    transcriptAudioError.value = 'Prepared full-length audio is unavailable for this transcript.';
+    return;
+  }
+  pendingTranscriptAudioSeek = Math.max(0, Number(transcript.offset_seconds || 0) - Number(transcript.audio.timeline_start_seconds || 0));
+  transcriptAudioError.value = '';
+  if (transcriptAudioUrl.value !== transcript.audio.url) {
+    transcriptAudioLoading.value = true;
+    transcriptAudioUrl.value = transcript.audio.url;
+    void nextTick(() => transcriptAudio.value?.load());
+    return;
+  }
+  seekTranscriptAudio();
+}
+function seekTranscriptAudio() {
+  const player = transcriptAudio.value;
+  if (!player || pendingTranscriptAudioSeek === null || player.readyState < 1) return;
+  player.currentTime = Math.min(pendingTranscriptAudioSeek, Number.isFinite(player.duration) ? player.duration : pendingTranscriptAudioSeek);
+  pendingTranscriptAudioSeek = null;
+  transcriptAudioLoading.value = false;
+}
+function skipTranscriptAudio(seconds: number) {
+  const player = transcriptAudio.value;
+  if (player && player.readyState >= 1) player.currentTime = Math.max(0, Math.min(player.duration || Infinity, player.currentTime + seconds));
+}
+function formatAudioTime(value: number) {
+  const seconds = Math.max(0, Math.floor(Number.isFinite(value) ? value : 0));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
 function scheduleSubtitlePolling(workflow: SubtitleWorkflow | null) {
   stopSubtitlePolling();
   if (!workflow || !subtitleLessonId.value) return;
@@ -397,6 +429,14 @@ onUnmounted(() => { stopSubtitlePolling(); window.removeEventListener('beforeunl
     <p v-if="workflowWarning" class="subtitle-worker-warning" role="status">{{ workflowWarning }}</p>
     <p v-if="workflowLoading && !subtitleWorkflow" class="category-empty-state">Loading subtitle workflow…</p>
     <template v-if="subtitleWorkflow">
+      <div v-if="subtitleWorkflow.transcripts.some(item => item.audio?.url)" class="subtitle-shared-audio" aria-label="Shared lesson audio player">
+        <strong>Lesson recording</strong>
+        <div class="subtitle-shared-audio-controls"><button class="secondary-button" type="button" :disabled="!transcriptAudioUrl" aria-label="Seek backward 10 seconds" @click="skipTranscriptAudio(-10)">−10s</button><audio ref="transcriptAudio" :src="transcriptAudioUrl || undefined" controls preload="metadata" aria-label="Full lesson audio" @loadstart="transcriptAudioLoading = true" @loadedmetadata="seekTranscriptAudio" @error="transcriptAudioLoading = false; transcriptAudioError = 'The prepared lesson audio could not be loaded.'"></audio><button class="secondary-button" type="button" :disabled="!transcriptAudioUrl" aria-label="Seek forward 10 seconds" @click="skipTranscriptAudio(10)">+10s</button></div>
+        <small v-if="transcriptAudioLoading" class="muted" role="status">Loading prepared lesson audio…</small>
+        <small v-if="transcriptAudioError" class="student-error" role="alert">{{ transcriptAudioError }}</small>
+        <small v-else class="muted">Select a transcript section to seek to its position. Audio time starts at the prepared audio timeline offset.</small>
+      </div>
+      <p v-else-if="subtitleWorkflow.transcripts.length" class="category-empty-state">The full-length prepared audio is unavailable for these transcript records.</p>
       <section class="lesson-list-panel subtitle-workflow-section">
         <div class="subtitle-workflow-toolbar"><span class="muted">Status refreshes while queue work is active.</span><button class="secondary-button" type="button" :disabled="workflowLoading" @click="refreshSubtitleWorkspace()">{{ workflowLoading ? 'Refreshing…' : 'Refresh status' }}</button></div>
         <div class="category-editor-heading"><div><h3>English transcript</h3><p class="muted">Prepare audio, transcribe, edit, approve, then align with WhisperX.</p></div><span class="category-state" :class="subtitleWorkflow.transcripts.some(item => item.approved) ? 'available' : 'unavailable'">{{ subtitleWorkflow.transcripts.some(item => item.approved) ? 'Transcript approved' : 'Needs review' }}</span></div>
@@ -414,6 +454,7 @@ onUnmounted(() => { stopSubtitlePolling(); window.removeEventListener('beforeunl
         <article v-for="transcript in subtitleWorkflow.transcripts" :key="transcript.operation_id" class="subtitle-operation-row">
           <div class="subtitle-operation-heading"><strong>Transcript #{{ transcript.operation_id }}</strong><span class="category-state" :class="transcript.approved ? 'available' : transcript.status === 'failed' ? 'unavailable' : 'archived'">{{ transcript.approved ? 'Approved' : transcript.status === 'succeeded' ? 'Pending review' : transcript.status }}</span></div>
           <small>Timeline offset {{ Number(transcript.offset_seconds || 0).toFixed(3) }} seconds · {{ (transcriptDrafts[transcript.operation_id] || '').length.toLocaleString() }} characters</small>
+          <button v-if="transcript.audio?.url" class="secondary-button subtitle-audio-seek" type="button" @click="selectTranscriptAudio(transcript)">Listen from {{ formatAudioTime(Number(transcript.offset_seconds || 0) - Number(transcript.audio.timeline_start_seconds || 0)) }}</button>
           <small v-if="transcript.recovered_artifact" class="subtitle-recovery-note">Recovered from existing private files. This is a new draft awaiting review. Historical alignment input association is unverified.</small>
           <small v-if="transcript.recovered_artifact" v-for="candidate in transcript.recovery_details?.source_audio_candidates || []" :key="candidate.sha256" class="muted">Audio candidate {{ candidate.path }} · SHA-256 {{ candidate.sha256 }}</small>
           <p v-if="transcript.error_message" class="student-error">{{ transcript.error_message }}</p>
@@ -428,6 +469,8 @@ onUnmounted(() => { stopSubtitlePolling(); window.removeEventListener('beforeunl
         <article v-for="alignment in subtitleWorkflow.alignments" :key="alignment.operation_id" class="subtitle-operation-row">
           <div class="subtitle-operation-heading"><strong>Alignment #{{ alignment.operation_id }}</strong><span class="category-state" :class="alignment.approved ? 'available' : alignment.status === 'failed' ? 'unavailable' : 'archived'">{{ alignment.approved ? 'Approved' : alignment.status === 'succeeded' ? 'Pending subtitle review' : alignment.status }}</span></div>
           <p v-if="alignment.error_message" class="student-error">{{ alignment.error_message }}</p>
+          <small v-if="alignment.status === 'queued'">Waiting for the {{ alignment.queue?.queue || 'WhisperX alignment' }} queue worker.</small>
+          <small v-if="alignment.status === 'processing'">{{ alignment.transcript_chunk_number && alignment.transcript_chunk_count ? `Aligning transcript chunk ${alignment.transcript_chunk_number} of ${alignment.transcript_chunk_count}` : 'Aligning the transcript with WhisperX' }} · process status is checked against its saved identity.</small>
           <small v-if="alignment.recovered_artifact" class="subtitle-recovery-note">Recovered alignment draft. Historical audio input association is unverified; timestamps are relative to the supplied chunk with no original lesson offset applied.</small>
           <template v-if="alignment.status === 'succeeded'">
             <div v-if="alignmentCueDrafts[alignment.operation_id]?.length" class="subtitle-section-editor">

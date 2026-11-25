@@ -49,7 +49,7 @@ class WhisperxAlignmentReconciler
         }
 
         $heartbeat = $result['heartbeat_at'] ?? null;
-        $heartbeatAge = is_string($heartbeat) ? $now->diffInSeconds(Carbon::parse($heartbeat)) : null;
+        $heartbeatAge = is_string($heartbeat) ? abs((int) $now->diffInSeconds(Carbon::parse($heartbeat))) : null;
         if ($heartbeatAge === null) {
             if ($this->processingOlderThan($usage, 120) && in_array($queueState, ['missing', 'failed'], true)) {
                 $processIds = $this->findMatchingAlignmentProcesses($usage);
@@ -79,15 +79,28 @@ class WhisperxAlignmentReconciler
             return ['queue_state' => 'heartbeat_stale_unverifiable', 'reconciled' => false];
         }
 
+        // A long alignment may make no measurable progress for several minutes.
+        // Before interpreting a stale progress heartbeat, verify the recorded
+        // subprocess identity. This prevents a live WhisperX process from being
+        // reported as stalled simply because its current chunk is expensive.
+        $processPid = $result['process_pid'] ?? null;
+        $identity = is_array($result['process_identity'] ?? null) ? $result['process_identity'] : null;
+        if (is_numeric($processPid) && $identity !== null) {
+            // The identity-aware check also proves liveness (Windows process
+            // creation ticks or Linux PID start ticks plus isolated group).
+            // A bare tasklist/kill -0 PID check is intentionally insufficient.
+            $matches = $this->matchesAlignmentProcess((int) $processPid, $usage, $identity);
+            if ($matches === null) return ['queue_state' => 'heartbeat_stale_unverifiable', 'reconciled' => false];
+            if ($matches) return ['queue_state' => 'alignment_process_active', 'reconciled' => false];
+        }
+
         $workerPid = $result['worker_pid'] ?? null;
         $workerAlive = $this->processAlive($workerPid);
         if ($workerAlive === true) return ['queue_state' => 'heartbeat_stale_worker_alive', 'reconciled' => false];
         if ($workerAlive === null) return ['queue_state' => 'heartbeat_stale_worker_unverifiable', 'reconciled' => false];
 
-        $processPid = $result['process_pid'] ?? null;
         $processAlive = $this->processAlive($processPid);
         if ($processAlive === null) return ['queue_state' => 'heartbeat_stale_unverifiable', 'reconciled' => false];
-        $identity = is_array($result['process_identity'] ?? null) ? $result['process_identity'] : null;
         if (DIRECTORY_SEPARATOR !== '\\' && $identity !== null && is_numeric($processPid)) {
             if ($processAlive) {
                 $matches = $this->matchesAlignmentProcess((int) $processPid, $usage, $identity);

@@ -42,6 +42,7 @@ Route::prefix('/admin')->middleware(['auth', 'role:admin'])->group(function () {
 Route::prefix('/api/admin')->middleware(['auth', 'role:admin'])->group(function () {
     Route::get('/lessons/{lesson}/subtitles', [App\Http\Controllers\AdminSubtitleController::class, 'index'])->name('admin.subtitles.index');
     Route::get('/lessons/{lesson}/subtitle-workflow', [App\Http\Controllers\AdminSubtitleWorkflowController::class, 'show'])->name('admin.subtitles.workflow');
+    Route::get('/lessons/{lesson}/subtitle-audio/{preparation}', [App\Http\Controllers\AdminSubtitleWorkflowController::class, 'audio'])->name('admin.subtitles.audio');
     Route::post('/lessons/{lesson}/subtitle-workflow/transcribe', [App\Http\Controllers\AdminSubtitleWorkflowController::class, 'transcribe']);
     Route::put('/lessons/{lesson}/transcripts/{transcript}/draft', [App\Http\Controllers\AdminSubtitleWorkflowController::class, 'saveTranscript']);
     Route::post('/lessons/{lesson}/transcripts/{transcript}/translate', [App\Http\Controllers\AdminSubtitleWorkflowController::class, 'translate']);
