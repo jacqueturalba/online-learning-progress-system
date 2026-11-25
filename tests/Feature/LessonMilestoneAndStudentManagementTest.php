@@ -30,10 +30,15 @@ it('shows a milestone after lesson completion, stores one response, and never ex
     $this->actingAs($student)->getJson('/api/learning')->assertOk()
         ->assertJsonPath('milestone.lesson_id', $lesson->id)
         ->assertJsonPath('milestone.join_url', null);
+    $submittedAt = now()->startOfSecond();
+    $this->travelTo($submittedAt);
     $this->postJson('/api/lesson-milestone-response', ['response' => 'I hope to discuss the lesson examples.'])->assertCreated();
     $this->postJson('/api/lesson-milestone-response', ['response' => 'A changed duplicate response.'])->assertOk();
+    $saved = StudentMilestoneResponse::where('student_id', $student->id)->firstOrFail();
     expect(StudentMilestoneResponse::where('student_id', $student->id)->count())->toBe(1)
-        ->and(StudentMilestoneResponse::where('student_id', $student->id)->value('response'))->toBe('I hope to discuss the lesson examples.');
+        ->and($saved->response)->toBe('I hope to discuss the lesson examples.')
+        ->and($saved->submitted_at->equalTo($submittedAt))->toBeTrue()
+        ->and($saved->fresh()->submitted_at->equalTo($submittedAt))->toBeTrue();
 });
 
 it('allows admins to edit and archive students while preventing deletion of accounts with history', function () {
