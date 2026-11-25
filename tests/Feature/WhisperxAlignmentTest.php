@@ -8,8 +8,11 @@ use App\Models\User;
 use App\Services\WhisperxAlignmentExecutor;
 use App\Services\WhisperxAlignmentException;
 use App\Services\WhisperxAlignmentService;
+use App\Services\WhisperxAlignmentReconciler;
 use App\Services\WhisperxProcessRunner;
+use App\Services\SymfonyWhisperxProcessRunner;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
 
@@ -65,7 +68,7 @@ function queueWhisperxForTest(Lesson $lesson, AiOperationUsage $transcript, stri
         'audio_path' => $audioPath,
     ]);
     $queued->assertAccepted();
-    return AiOperationUsage::query()->where('service', 'whisperx_alignment')->firstOrFail();
+    return AiOperationUsage::query()->where('service', 'whisperx_alignment')->latest('id')->firstOrFail();
 }
 
 function fakeWhisperxSuccess(WhisperxProcessRunner $processes, string $transcript, float $duration = 5.0): void
@@ -77,7 +80,7 @@ function fakeWhisperxSuccess(WhisperxProcessRunner $processes, string $transcrip
         $words[] = ['text' => $token, 'start' => $cursor, 'end' => $cursor + 0.5, 'score' => 0.9, 'status' => 'aligned'];
         $cursor += 0.5;
     }
-    $processes->shouldReceive('run')->once()->withArgs(function (array $arguments, int $timeout): bool {
+    $processes->shouldReceive('run')->once()->withArgs(function (array $arguments, int $timeout, ?callable $heartbeat = null): bool {
         expect($arguments)->toHaveCount(12)
             ->and($arguments[2])->toBe('--audio')
             ->and($arguments[4])->toBe('--transcript')
@@ -145,6 +148,136 @@ it('requires an admin-approved English transcript and queues once on the dedicat
     Queue::assertPushed(RunWhisperxAlignment::class, 1);
     $job = Queue::pushed(RunWhisperxAlignment::class)->first();
     expect($job->connection)->toBe('whisperx')->and($job->queue)->toBe('whisperx-alignment');
+    expect($job->timeout)->toBe((int) config('whisperx.job_timeout'))
+        ->and((int) config('queue.connections.whisperx.retry_after'))->toBeGreaterThan($job->timeout)
+        ->and($operation->result['queue_token'])->not->toBeEmpty();
+});
+
+it('runs short processes successfully and terminates timed out processes', function () {
+    $runner = new SymfonyWhisperxProcessRunner();
+    $heartbeats = 0;
+    $processIdentity = null;
+    $exitCode = $runner->run([PHP_BINARY, '-r', 'usleep(250000);'], 3, function (?int $pid = null, ?array $identity = null) use (&$heartbeats, &$processIdentity): void {
+        $heartbeats++;
+        $processIdentity = $identity;
+    });
+    expect($exitCode)->toBe(0)->and($heartbeats)->toBeGreaterThan(0);
+    expect($processIdentity['process_id'] ?? null)->toBeGreaterThan(1)
+        ->and($processIdentity['creation_ticks'] ?? $processIdentity['start_ticks'] ?? null)->not->toBeNull();
+
+    $marker = tempnam(sys_get_temp_dir(), 'whisperx-timeout-');
+    expect(unlink($marker))->toBeTrue();
+    expect(file_exists($marker))->toBeFalse('Unexpected orphan marker at '.$marker);
+    $code = '$marker = '.var_export($marker, true).'; usleep(1800000); file_put_contents($marker, "orphan");';
+    try {
+        $runner->run([PHP_BINARY, '-r', $code], 1);
+        test()->fail('Expected the fake process to time out.');
+    } catch (WhisperxAlignmentException $exception) {
+        expect($exception->safeCode)->toBe('ProcessTimedOut');
+    }
+    usleep(1_000_000);
+    expect(file_exists($marker))->toBeFalse('Unexpected orphan marker at '.$marker);
+});
+
+it('terminates descendant processes with the WhisperX process group on Linux', function () {
+    if (DIRECTORY_SEPARATOR === '\\' || !(new \Symfony\Component\Process\ExecutableFinder())->find('setsid') || !function_exists('posix_kill')) {
+        $this->markTestSkipped('Isolated process-group verification requires Linux setsid and POSIX signals.');
+    }
+
+    $marker = tempnam(sys_get_temp_dir(), 'whisperx-child-');
+    $unrelatedMarker = tempnam(sys_get_temp_dir(), 'whisperx-unrelated-');
+    expect(unlink($marker))->toBeTrue()->and(unlink($unrelatedMarker))->toBeTrue();
+    $childCode = '$marker = '.var_export($marker, true).'; usleep(2200000); file_put_contents($marker, "orphan");';
+    $childArgument = var_export($childCode, true);
+    $parentCode = '$child = proc_open(['.var_export(PHP_BINARY, true).', "-r", '.$childArgument.'], '
+        .'[0 => ["file", "/dev/null", "r"], 1 => ["file", "/dev/null", "a"], 2 => ["file", "/dev/null", "a"]], $pipes, null, null, ["bypass_shell" => true]); '
+        .'usleep(10000000);';
+    $unrelated = proc_open([PHP_BINARY, '-r', '$marker = '.var_export($unrelatedMarker, true).'; usleep(2200000); file_put_contents($marker, "alive");'],
+        [0 => ['file', '/dev/null', 'r'], 1 => ['file', '/dev/null', 'a'], 2 => ['file', '/dev/null', 'a']], $unrelatedPipes, null, null, ['bypass_shell' => true]);
+    $groupId = null;
+
+    try {
+        (new SymfonyWhisperxProcessRunner())->run([PHP_BINARY, '-r', $parentCode], 1, function (?int $pid, ?array $identity) use (&$groupId): void {
+            $groupId = $identity['process_group_id'] ?? null;
+        });
+        test()->fail('Expected the parent process to time out.');
+    } catch (WhisperxAlignmentException $exception) {
+        expect($exception->safeCode)->toBe('ProcessTimedOut');
+    }
+    usleep(1_500_000);
+    expect(file_exists($marker))->toBeFalse('A descendant survived process-group cleanup.')
+        ->and(file_exists($unrelatedMarker))->toBeTrue('An unrelated process was terminated with the alignment group.');
+    expect($groupId)->toBeGreaterThan(1);
+    foreach (glob('/proc/[0-9]*/stat') ?: [] as $path) {
+        $stat = @file_get_contents($path);
+        if (is_string($stat) && preg_match('/^\d+ \(.*\) (.*)$/', $stat, $parts)) {
+            $fields = preg_split('/\s+/', trim($parts[1]));
+            expect(!is_array($fields) || ($fields[0] ?? '') === 'Z' || (int) ($fields[2] ?? 0) !== $groupId)
+                ->toBeTrue('A live process remains in the alignment process group.');
+        }
+    }
+    if (is_resource($unrelated)) proc_close($unrelated);
+});
+
+it('terminates Windows descendants with the parent process tree on timeout', function () {
+    if (DIRECTORY_SEPARATOR !== '\\') $this->markTestSkipped('Windows process-tree verification runs on Windows.');
+    $marker = tempnam(sys_get_temp_dir(), 'whisperx-win-child-');
+    $parentMarker = tempnam(sys_get_temp_dir(), 'whisperx-win-parent-');
+    expect(unlink($marker))->toBeTrue()->and(unlink($parentMarker))->toBeTrue();
+    $childCode = '$marker = '.var_export($marker, true).'; usleep(2200000); file_put_contents($marker, "orphan");';
+    $parentCode = '$child = proc_open(['.var_export(PHP_BINARY, true).', "-r", '.var_export($childCode, true).'], '
+        .'[0 => ["file", "NUL", "r"], 1 => ["file", "NUL", "a"], 2 => ["file", "NUL", "a"]], $pipes, null, null, ["bypass_shell" => true]); '
+        .'usleep(2200000); file_put_contents('.var_export($parentMarker, true).', "orphan"); usleep(10000000);';
+    try {
+        (new SymfonyWhisperxProcessRunner())->run([PHP_BINARY, '-r', $parentCode], 1);
+        test()->fail('Expected the parent process to time out.');
+    } catch (WhisperxAlignmentException $exception) {
+        expect($exception->safeCode)->toBe('ProcessTimedOut');
+    }
+    usleep(1_500_000);
+    expect(file_exists($marker))->toBeFalse('A Windows descendant survived process-tree cleanup.')
+        ->and(file_exists($parentMarker))->toBeFalse('The Windows parent process survived timeout cleanup.');
+});
+
+it('cleans up descendants when heartbeat handling throws', function () {
+    $spawnedMarker = tempnam(sys_get_temp_dir(), 'whisperx-spawned-');
+    $lateMarker = tempnam(sys_get_temp_dir(), 'whisperx-exception-child-');
+    expect(unlink($spawnedMarker))->toBeTrue()->and(unlink($lateMarker))->toBeTrue();
+    $childCode = '$spawned = '.var_export($spawnedMarker, true).'; $late = '.var_export($lateMarker, true).'; '
+        .'file_put_contents($spawned, "ready"); usleep(2200000); file_put_contents($late, "orphan");';
+    $parentCode = '$child = proc_open(['.var_export(PHP_BINARY, true).', "-r", '.var_export($childCode, true).'], '
+        .'[0 => ["file", '.var_export(DIRECTORY_SEPARATOR === '\\' ? 'NUL' : '/dev/null', true).', "r"], '
+        .'1 => ["file", '.var_export(DIRECTORY_SEPARATOR === '\\' ? 'NUL' : '/dev/null', true).', "a"], '
+        .'2 => ["file", '.var_export(DIRECTORY_SEPARATOR === '\\' ? 'NUL' : '/dev/null', true).', "a"]], $pipes, null, null, ["bypass_shell" => true]); '
+        .'while (!file_exists('.var_export($spawnedMarker, true).')) usleep(10000); usleep(10000000);';
+    try {
+        (new SymfonyWhisperxProcessRunner())->run([PHP_BINARY, '-r', $parentCode], 10, function () use ($spawnedMarker): void {
+            $limit = microtime(true) + 3;
+            while (!file_exists($spawnedMarker) && microtime(true) < $limit) usleep(10000);
+            throw new RuntimeException('Simulated heartbeat failure.');
+        });
+        test()->fail('Expected heartbeat handling to fail the process run.');
+    } catch (WhisperxAlignmentException $exception) {
+        expect($exception->safeCode)->toBe('ProcessFailed');
+    }
+    usleep(1_500_000);
+    expect(file_exists($lateMarker))->toBeFalse('A descendant survived exception cleanup.');
+});
+
+it('does not leave a descendant behind when the parent exits normally', function () {
+    $spawnedMarker = tempnam(sys_get_temp_dir(), 'whisperx-normal-spawned-');
+    $lateMarker = tempnam(sys_get_temp_dir(), 'whisperx-normal-child-');
+    expect(unlink($spawnedMarker))->toBeTrue()->and(unlink($lateMarker))->toBeTrue();
+    $nullDevice = DIRECTORY_SEPARATOR === '\\' ? 'NUL' : '/dev/null';
+    $childCode = '$spawned = '.var_export($spawnedMarker, true).'; $late = '.var_export($lateMarker, true).'; '
+        .'file_put_contents($spawned, "ready"); usleep(1200000); file_put_contents($late, "orphan");';
+    $parentCode = '$child = proc_open(['.var_export(PHP_BINARY, true).', "-r", '.var_export($childCode, true).'], '
+        .'[0 => ["file", '.var_export($nullDevice, true).', "r"], 1 => ["file", '.var_export($nullDevice, true).', "a"], '
+        .'2 => ["file", '.var_export($nullDevice, true).', "a"]], $pipes, null, null, ["bypass_shell" => true]); '
+        .'while (!file_exists('.var_export($spawnedMarker, true).')) usleep(10000);';
+    expect((new SymfonyWhisperxProcessRunner())->run([PHP_BINARY, '-r', $parentCode], 5))->toBe(0);
+    usleep(1_500_000);
+    expect(file_exists($lateMarker))->toBeFalse('A descendant survived normal parent exit.');
 });
 
 it('passes an argument array, validates outputs, applies the stored offset once, and keeps SRT pending admin review', function () {
@@ -213,6 +346,154 @@ it('records missing Python or runner configuration as safe failures without star
     }
 });
 
+it('marks a queued alignment failed when its matching queue job is missing', function () {
+    $lesson = whisperxTestLesson();
+    $transcript = whisperxTranscript($lesson);
+    $audio = whisperxPreparedAudio();
+    Queue::fake();
+    $usage = queueWhisperxForTest($lesson, $transcript, $audio, whisperxAdmin());
+    $usage->forceFill(['updated_at' => now()->subSeconds(90)])->save();
+
+    $state = app(WhisperxAlignmentReconciler::class)->reconcile($usage->fresh());
+    expect($state['queue_state'])->toBe('missing')
+        ->and($state['reconciled'])->toBeTrue()
+        ->and($usage->fresh()->status)->toBe('failed')
+        ->and($usage->fresh()->error_code)->toBe('QueueJobMissing');
+});
+
+it('keeps a pending job queued when no worker heartbeat exists and prevents duplicate dispatch', function () {
+    $lesson = whisperxTestLesson();
+    $transcript = whisperxTranscript($lesson);
+    $audio = whisperxPreparedAudio();
+    $admin = whisperxAdmin();
+    Queue::fake();
+    $usage = queueWhisperxForTest($lesson, $transcript, $audio, $admin);
+    $token = $usage->result['queue_token'];
+    DB::table('jobs')->insert([
+        'queue' => 'whisperx-alignment', 'payload' => json_encode(['queue_token' => $token]),
+        'attempts' => 0, 'reserved_at' => null, 'available_at' => now()->timestamp, 'created_at' => now()->timestamp,
+    ]);
+
+    $state = app(WhisperxAlignmentReconciler::class)->reconcile($usage->fresh());
+    expect($state['queue_state'])->toBe('pending_no_worker')
+        ->and($usage->fresh()->status)->toBe('queued');
+
+    $this->postJson('/api/admin/lessons/'.$lesson->id.'/whisperx-alignments', [
+        'transcript_operation_id' => $transcript->id, 'audio_path' => $audio,
+    ])->assertOk()->assertJsonPath('already_submitted', true);
+    Queue::assertPushed(RunWhisperxAlignment::class, 1);
+});
+
+it('recognizes delayed, reserved, and failed queue records without inventing terminal states', function () {
+    $lesson = whisperxTestLesson();
+    $admin = whisperxAdmin();
+    Queue::fake();
+    $reconciler = app(WhisperxAlignmentReconciler::class);
+    $states = [];
+
+    foreach ([
+        'delayed' => ['reserved_at' => null, 'available_at' => now()->addMinutes(2)->timestamp],
+        'reserved' => ['reserved_at' => now()->subSeconds(150)->timestamp, 'available_at' => now()->timestamp],
+    ] as $expectedState => $queueFields) {
+        $transcript = whisperxTranscript($lesson, ucfirst($expectedState).'.');
+        $audio = whisperxPreparedAudio();
+        $usage = queueWhisperxForTest($lesson, $transcript, $audio, $admin);
+        if ($expectedState === 'reserved') $usage->forceFill(['updated_at' => now()->subSeconds(150)])->save();
+        DB::table('jobs')->insert(['queue' => 'whisperx-alignment', 'payload' => json_encode(['queue_token' => $usage->result['queue_token']]),
+            'attempts' => 1, ...$queueFields, 'created_at' => now()->timestamp]);
+        $result = $reconciler->reconcile($usage->fresh());
+        $states[] = [$result['queue_state'], $usage->fresh()->status];
+    }
+
+    $transcript = whisperxTranscript($lesson, 'Failed queue.');
+    $audio = whisperxPreparedAudio();
+    $failedUsage = queueWhisperxForTest($lesson, $transcript, $audio, $admin);
+    DB::table('failed_jobs')->insert([
+        'uuid' => (string) str()->uuid(), 'connection' => 'whisperx', 'queue' => 'whisperx-alignment',
+        'payload' => json_encode(['queue_token' => $failedUsage->result['queue_token']]), 'exception' => 'controlled test failure', 'failed_at' => now(),
+    ]);
+    $failedState = $reconciler->reconcile($failedUsage->fresh());
+
+    expect($states)->toBe([['delayed', 'queued'], ['reserved_stalled', 'queued']])
+        ->and($failedState['queue_state'])->toBe('failed')
+        ->and($failedUsage->fresh()->status)->toBe('failed')
+        ->and($failedUsage->fresh()->error_code)->toBe('QueueJobFailed');
+});
+
+it('matches a legacy queued job by its serialized operation ID when no queue token exists', function () {
+    Queue::fake();
+    $lesson = whisperxTestLesson();
+    $usage = AiOperationUsage::query()->create([
+        'service' => WhisperxAlignmentService::ALIGNMENT_SERVICE, 'model' => 'whisperx-3.8.6',
+        'lesson_id' => $lesson->id, 'status' => 'queued', 'idempotency_key' => 'whisperx-legacy-'.str()->uuid(),
+        'request_fingerprint' => hash('sha256', 'legacy'), 'result' => ['processing_started_at' => null],
+    ]);
+    $command = 'O:'.strlen(RunWhisperxAlignment::class).':"'.RunWhisperxAlignment::class.'":1:{s:7:"usageId";i:'.$usage->id.';}';
+    DB::table('jobs')->insert([
+        'queue' => 'whisperx-alignment', 'payload' => json_encode(['data' => [
+            'commandName' => RunWhisperxAlignment::class, 'command' => $command,
+        ]]), 'attempts' => 0, 'reserved_at' => null, 'available_at' => now()->timestamp, 'created_at' => now()->timestamp,
+    ]);
+
+    $state = app(WhisperxAlignmentReconciler::class)->reconcile($usage);
+    expect($state['queue_state'])->toBe('pending_no_worker')
+        ->and($state['reconciled'])->toBeFalse()
+        ->and($usage->fresh()->status)->toBe('queued');
+});
+
+it('reconciles an interrupted alignment only after its heartbeat expires and worker is confirmed gone', function () {
+    if (!function_exists('posix_kill')) $this->markTestSkipped('Process liveness checks require POSIX support.');
+
+    $lesson = whisperxTestLesson();
+    $usage = AiOperationUsage::query()->create([
+        'service' => WhisperxAlignmentService::ALIGNMENT_SERVICE, 'model' => 'whisperx-3.8.6',
+        'lesson_id' => $lesson->id, 'status' => 'processing', 'idempotency_key' => 'whisperx-interrupted-'.str()->uuid(),
+        'request_fingerprint' => hash('sha256', 'interrupted'),
+        'result' => [
+            'queue_token' => (string) str()->uuid(), 'heartbeat_at' => now()->subSeconds(180)->toIso8601String(),
+            'worker_pid' => PHP_INT_MAX, 'worker_host' => gethostname(), 'process_pid' => null,
+        ],
+    ]);
+
+    $state = app(WhisperxAlignmentReconciler::class)->reconcile($usage);
+    expect($state['reconciled'])->toBeTrue()
+        ->and($usage->fresh()->status)->toBe('failed')
+        ->and($usage->fresh()->error_code)->toBe('WorkerInterrupted');
+});
+
+it('does not terminate a Linux process when its saved start identity no longer matches the PID', function () {
+    if (DIRECTORY_SEPARATOR === '\\' || !function_exists('posix_kill')) {
+        $this->markTestSkipped('Linux PID-reuse protection requires /proc and POSIX signals.');
+    }
+    $lesson = whisperxTestLesson();
+    $process = proc_open([PHP_BINARY, '-r', 'sleep(10);'],
+        [0 => ['file', '/dev/null', 'r'], 1 => ['file', '/dev/null', 'a'], 2 => ['file', '/dev/null', 'a']], $pipes, null, null, ['bypass_shell' => true]);
+    expect(is_resource($process))->toBeTrue();
+    $pid = (int) (proc_get_status($process)['pid'] ?? 0);
+    $usage = AiOperationUsage::query()->create([
+        'service' => 'whisperx_alignment', 'model' => 'whisperx', 'lesson_id' => $lesson->id,
+        'status' => 'processing', 'idempotency_key' => 'whisperx-pid-reuse-'.str()->uuid(),
+        'request_fingerprint' => hash('sha256', str()->uuid()),
+        'result' => [
+            'queue_token' => (string) str()->uuid(), 'heartbeat_at' => now()->subSeconds(180)->toIso8601String(),
+            'worker_pid' => PHP_INT_MAX, 'worker_host' => gethostname(), 'process_pid' => $pid,
+            'process_identity' => ['process_id' => $pid, 'process_group_id' => $pid, 'session_id' => $pid, 'start_ticks' => 'reused-pid'],
+            'processing_started_at' => now()->subMinutes(4)->toIso8601String(),
+        ],
+    ]);
+    try {
+        $result = app(WhisperxAlignmentReconciler::class)->reconcile($usage);
+        expect($result['reconciled'])->toBeTrue()
+            ->and($usage->fresh()->status)->toBe('failed')
+            ->and(@posix_kill($pid, 0))->toBeTrue('The unrelated process must remain alive when PID identity differs.');
+    } finally {
+        if (is_resource($process)) {
+            @proc_terminate($process, 9);
+            @proc_close($process);
+        }
+    }
+});
+
 it('handles non-zero process exits and timeouts without retaining incomplete output', function (string $failure, string $safeCode) {
     $lesson = whisperxTestLesson();
     $transcript = whisperxTranscript($lesson);
@@ -222,20 +503,28 @@ it('handles non-zero process exits and timeouts without retaining incomplete out
     $usage = queueWhisperxForTest($lesson, $transcript, $audio, $admin);
     $processes = Mockery::mock(WhisperxProcessRunner::class);
     if ($failure === 'exit') {
-        $processes->shouldReceive('run')->once()->andReturn(9);
+        $processes->shouldReceive('run')->twice()->andReturn(9);
     } else {
-        $processes->shouldReceive('run')->once()->andThrow(new WhisperxAlignmentException('ProcessTimedOut', 'WhisperX exceeded its configured processing timeout.'));
+        $processes->shouldReceive('run')->twice()->andThrow(new WhisperxAlignmentException('ProcessTimedOut', 'WhisperX exceeded its configured processing timeout.'));
     }
     $this->app->instance(WhisperxProcessRunner::class, $processes);
     $job = Queue::pushed(RunWhisperxAlignment::class)->first();
+    $queueJob = Mockery::mock(\Illuminate\Contracts\Queue\Job::class);
+    $queueJob->shouldReceive('attempts')->twice()->andReturn(1, 2);
+    $job->setJob($queueJob);
 
-    try {
-        $job->handle(app(WhisperxAlignmentExecutor::class));
-        test()->fail('Expected the mocked process failure.');
-    } catch (WhisperxAlignmentException $exception) {
-        expect($exception->safeCode)->toBe($safeCode);
-        $job->failed($exception);
+    $finalException = null;
+    foreach ([1 => 'queued', 2 => 'failed'] as $attempt => $expectedStatus) {
+        try {
+            $job->handle(app(WhisperxAlignmentExecutor::class));
+            test()->fail('Expected the mocked process failure.');
+        } catch (WhisperxAlignmentException $exception) {
+            $finalException = $exception;
+            expect($exception->safeCode)->toBe($safeCode)
+                ->and($usage->fresh()->status)->toBe($expectedStatus);
+        }
     }
+    $job->failed($finalException);
 
     expect($usage->fresh()->status)->toBe('failed')
         ->and($usage->fresh()->error_code)->toBe($safeCode);

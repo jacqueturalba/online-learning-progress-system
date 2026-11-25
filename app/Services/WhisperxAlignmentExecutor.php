@@ -20,7 +20,7 @@ class WhisperxAlignmentExecutor
         return $hash;
     }
 
-    public function align(int $lessonId, int $operationId, string $audioRelativePath, string $transcript, float $timelineOffsetSeconds): array
+    public function align(int $lessonId, int $operationId, string $audioRelativePath, string $transcript, float $timelineOffsetSeconds, ?callable $onHeartbeat = null): array
     {
         $audioPath = $this->resolvePreparedAudio($audioRelativePath);
         if (trim($transcript) === '') throw new WhisperxAlignmentException('TranscriptUnavailable', 'The approved transcript is empty.');
@@ -54,7 +54,7 @@ class WhisperxAlignmentExecutor
                 '--device', (string) config('whisperx.device', 'cpu'),
             ];
 
-            $exitCode = $this->processes->run($processArguments, (int) config('whisperx.timeout', 7200));
+            $exitCode = $this->processes->run($processArguments, (int) config('whisperx.process_timeout', config('whisperx.timeout', 7200)), $onHeartbeat);
             if ($exitCode !== 0) throw new WhisperxAlignmentException('ProcessFailed', 'WhisperX exited with a non-zero status.');
 
             foreach ($paths as $path) {

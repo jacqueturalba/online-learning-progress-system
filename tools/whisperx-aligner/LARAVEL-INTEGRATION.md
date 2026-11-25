@@ -43,7 +43,10 @@ WHISPERX_ENABLED=true
 WHISPERX_PYTHON_BINARY=/absolute/path/to/venv/bin/python
 WHISPERX_SCRIPT_PATH=/absolute/path/to/app/tools/whisperx-aligner/align_transcript.py
 WHISPERX_DEVICE=cpu
-WHISPERX_TIMEOUT=7200
+WHISPERX_PROCESS_TIMEOUT=7200
+WHISPERX_JOB_TIMEOUT=7500
+WHISPERX_WORKER_TIMEOUT=7500
+WHISPERX_RETRY_AFTER=7800
 ```
 
 Install Python and the CPU-only requirements in a dedicated Linux virtual environment on Plesk. The checked-in `requirements.txt` records the validated Windows environment; generate and validate a Linux-specific lock from the pinned WhisperX/PyTorch versions rather than assuming Windows wheels apply. Install FFmpeg on the server and make `ffmpeg` available on the worker's `PATH`. The first alignment also downloads the English alignment model into the worker user's writable PyTorch cache.
@@ -55,10 +58,12 @@ Run database migrations that create `jobs` and `failed_jobs`, and ensure the app
 Keep a PHP CLI worker running under Plesk's process supervisor/service manager:
 
 ```sh
-php artisan queue:work whisperx --queue=whisperx-alignment --sleep=3 --tries=2 --timeout=7200
+php artisan queue:work whisperx --queue=whisperx-alignment --sleep=3 --tries=2 --timeout=7500
 php artisan queue:work database --queue=default --sleep=3 --tries=3 --timeout=120
 ```
 
-The `whisperx` connection's retry window is the configured alignment timeout plus five minutes. Set worker timeouts accordingly and restart workers after deployment/configuration changes. The first alignment also downloads the English alignment model into the worker user's writable PyTorch cache. Alignment outputs are stored under Laravel's private local disk at `whisperx-alignments/`.
+The Python process timeout is 7,200 seconds; Laravel's job and worker timeouts are 7,500 seconds; the queue `retry_after` is 7,800 seconds. Symfony terminates the process before the job deadline, leaving time for Laravel to record the timeout and clean incomplete outputs. Linux launches through `setsid`, verifies the new session/process-group ID, and records `/proc` start ticks; cleanup signals only the verified group. Windows launches through a PowerShell supervisor that assigns the alignment process to a Job Object configured with `KILL_ON_JOB_CLOSE`; terminating the supervisor handle also closes the job and terminates descendants. The worker publishes a local heartbeat while waiting and while an alignment is active. Heartbeat directories are owner-only (`0700`) and heartbeat files are owner-only (`0600`); the web app, queue worker, and scheduler must run as the same site OS user for status checks and stale cleanup to work. `whisperx:reconcile` checks operation tokens against pending, reserved, delayed, and failed queue records; the workflow API also reconciles when opened. Its scheduler mutex expires after 10 minutes if an unclean scheduler stop leaves the cache lock behind; the scheduler's cache lock path must be writable by the site account. Enable Laravel's scheduler for periodic stale-operation reconciliation and restart workers after deployment/configuration changes. Legacy `WHISPERX_TIMEOUT` remains a fallback for the process timeout. The first alignment also downloads the English alignment model into the worker user's writable PyTorch cache. Alignment outputs are stored under Laravel's private local disk at `whisperx-alignments/`.
+
+If the queue worker is forcibly terminated outside Laravel's timeout handling (for example by a host reboot or `SIGKILL`), PHP cannot run its cleanup handler. The saved process-group identity allows the scheduled reconciler to terminate that exact local group once the worker heartbeat is stale. Keep the scheduler enabled and run the worker and scheduler under the same site account; this recovery is periodic rather than instantaneous.
 
 Python output timestamps are relative to the prepared chunk. Laravel applies the transcription operation's stored timeline offset once to the aligned JSON and SRT; it does not merge chunks or deduplicate overlap.

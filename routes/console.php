@@ -12,6 +12,8 @@ use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Schedule;
 use App\Services\StudentPaceGroupAssigner;
+use App\Services\WhisperxAlignmentReconciler;
+use App\Services\WhisperxAlignmentService;
 
 Artisan::command('students:recalculate-pace-groups', function (StudentPaceGroupAssigner $assigner): int {
     $assigner->recalculateAll();
@@ -20,6 +22,17 @@ Artisan::command('students:recalculate-pace-groups', function (StudentPaceGroupA
 })->purpose('Recalculate automatic student pace groups for the active calendar period');
 
 Schedule::command('students:recalculate-pace-groups')->dailyAt('00:00')->timezone(config('app.timezone'));
+
+Artisan::command('whisperx:reconcile', function (WhisperxAlignmentReconciler $reconciler): int {
+    AiOperationUsage::query()->where('service', WhisperxAlignmentService::ALIGNMENT_SERVICE)
+        ->whereIn('status', ['queued', 'processing'])->orderBy('id')->chunkById(100, function ($operations) use ($reconciler): void {
+            foreach ($operations as $operation) $reconciler->reconcile($operation);
+        });
+    $this->info('WhisperX queue and heartbeat evidence reconciled.');
+    return 0;
+})->purpose('Reconcile stale WhisperX operation states using queue and heartbeat evidence');
+
+Schedule::command('whisperx:reconcile')->everyMinute()->withoutOverlapping(10)->timezone(config('app.timezone'));
 
 Artisan::command('app:create-admin', function () {
     $name = trim((string) $this->ask('Admin name'));

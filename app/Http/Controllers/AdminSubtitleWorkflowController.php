@@ -9,6 +9,7 @@ use App\Services\AiOperationService;
 use App\Services\ApprovedSubtitleService;
 use App\Services\SubtitleSrtCueService;
 use App\Services\WhisperxAlignmentService;
+use App\Services\WhisperxAlignmentReconciler;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
@@ -18,7 +19,7 @@ use Throwable;
 
 class AdminSubtitleWorkflowController extends Controller
 {
-    public function show(Lesson $lesson, WhisperxAlignmentService $alignments)
+    public function show(Lesson $lesson, WhisperxAlignmentService $alignments, WhisperxAlignmentReconciler $reconciler)
     {
         $transcriptions = AiOperationUsage::query()->where('lesson_id', $lesson->id)->where('service', 'transcription')->latest('id')->limit(50)->get();
         $translations = AiOperationUsage::query()->where('lesson_id', $lesson->id)->where('service', 'translation')->latest('id')->limit(50)->get();
@@ -78,7 +79,9 @@ class AdminSubtitleWorkflowController extends Controller
                     'queue' => $this->queueDetails($operation, (string) config('queue.default'), 600),
                 ];
             })->values(),
-            'alignments' => $alignmentsByTranscript->map(function (AiOperationUsage $operation) use ($alignments): array {
+            'alignments' => $alignmentsByTranscript->map(function (AiOperationUsage $operation) use ($alignments, $reconciler): array {
+                $reconciliation = $reconciler->reconcile($operation);
+                $operation->refresh();
                 $result = is_array($operation->result) ? $operation->result : [];
                 return $alignments->safeStatus($operation) + [
                     'approved' => ($result['approval_statuses']['en'] ?? null) === 'approved',
@@ -87,7 +90,8 @@ class AdminSubtitleWorkflowController extends Controller
                     'transcript_sha256' => $result['transcript_sha256'] ?? null,
                     'recovered_artifact' => ($result['recovery']['recovered_artifact'] ?? false) === true,
                     'recovery_details' => $this->recoveryDetails($result['recovery'] ?? null),
-                    'queue' => $this->queueDetails($operation, 'whisperx'),
+                    'queue' => $this->queueDetails($operation, 'whisperx', null, $reconciliation['queue_state']),
+                    'queue_state' => $reconciliation['queue_state'],
                 ];
             })->values(),
             'translations' => $translations->map(function (AiOperationUsage $operation): ?array {
@@ -171,21 +175,29 @@ class AdminSubtitleWorkflowController extends Controller
         return response()->json(['operation_id' => $usage->id, 'status' => 'queued', 'already_submitted' => false], 202);
     }
 
-    private function queueDetails(?AiOperationUsage $operation, string $connectionName, ?int $jobTimeout = null): ?array
+    private function queueDetails(?AiOperationUsage $operation, string $connectionName, ?int $jobTimeout = null, ?string $queueState = null): ?array
     {
         if (!$operation) return null;
         $connection = config('queue.connections.'.$connectionName, []);
         $queueName = (string) ($connection['queue'] ?? 'default');
-        $workerTimeout = $connectionName === 'whisperx' ? max(3600, (int) config('whisperx.timeout', 7200)) : ($jobTimeout ?? 120);
+        $workerTimeout = $connectionName === 'whisperx' ? (int) config('whisperx.worker_timeout', 7500) : ($jobTimeout ?? 120);
         $workerTries = $connectionName === 'whisperx' ? 2 : 3;
-        $waitSeconds = $operation->status === 'queued' && $operation->updated_at
-            ? max(0, (int) $operation->updated_at->diffInSeconds(now())) : 0;
-        $stalled = $operation->status === 'queued' && $waitSeconds >= 60;
+        $waitSeconds = $operation->status === 'processing' && is_array($operation->result)
+            && is_string($operation->result['heartbeat_at'] ?? $operation->result['processing_started_at'] ?? null)
+            ? max(0, (int) now()->diffInSeconds(\Illuminate\Support\Carbon::parse($operation->result['heartbeat_at'] ?? $operation->result['processing_started_at'])))
+            : ($operation->status === 'queued' && $operation->updated_at ? max(0, (int) $operation->updated_at->diffInSeconds(now())) : 0);
+        $stalled = $operation->status === 'queued'
+            ? ($queueState === 'pending_no_worker' || (in_array($queueState, ['missing', 'untracked'], true) && $waitSeconds >= 60)
+                || in_array($queueState, ['delayed', 'reserved_stalled', 'heartbeat_stale_worker_alive', 'heartbeat_stale_worker_unverifiable', 'heartbeat_stale_unverifiable'], true)
+                || ($queueState === null && $waitSeconds >= 60))
+            : ($operation->status === 'processing' && $waitSeconds > 90
+                && in_array($queueState, ['missing', 'untracked', 'heartbeat_stale_worker_alive', 'heartbeat_stale_worker_unverifiable', 'heartbeat_stale_unverifiable'], true));
         return [
             'connection' => $connectionName,
             'queue' => $queueName,
             'waiting_seconds' => $waitSeconds,
             'worker_stalled' => $stalled,
+            'state' => $queueState,
             'worker_command' => 'php artisan queue:work '.$connectionName.' --queue='.$queueName.' --sleep=3 --tries='.$workerTries.' --timeout='.$workerTimeout,
         ];
     }

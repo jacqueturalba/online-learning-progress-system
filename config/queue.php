@@ -1,5 +1,9 @@
 <?php
 
+$whisperxProcessTimeout = max(60, (int) env('WHISPERX_PROCESS_TIMEOUT', env('WHISPERX_TIMEOUT', 7200)));
+$whisperxJobTimeout = max($whisperxProcessTimeout + 300, (int) env('WHISPERX_JOB_TIMEOUT', 7500));
+$whisperxWorkerTimeout = max($whisperxJobTimeout, (int) env('WHISPERX_WORKER_TIMEOUT', 7500));
+
 return [
     'default' => env('QUEUE_CONNECTION', 'sync'),
     'connections' => [
@@ -17,7 +21,7 @@ return [
             'connection' => env('DB_QUEUE_CONNECTION'),
             'table' => env('DB_QUEUE_TABLE', 'jobs'),
             'queue' => 'whisperx-alignment',
-            'retry_after' => max(300, (int) env('WHISPERX_TIMEOUT', 7200) + 300),
+            'retry_after' => max($whisperxWorkerTimeout + 300, (int) env('WHISPERX_RETRY_AFTER', 7800)),
             'after_commit' => true,
         ],
         'redis' => [
