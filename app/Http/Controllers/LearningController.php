@@ -7,6 +7,10 @@ use App\Models\Lesson;
 use App\Models\StudentLessonProgress;
 use App\Models\StudentCategoryProgress;
 use App\Models\User;
+use App\Models\SiteSetting;
+use App\Models\ZoomSession;
+use App\Models\StudentMilestoneResponse;
+use App\Services\StudentPaceGroupAssigner;
 use App\Support\StudentLessonAccess;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -22,7 +26,7 @@ class LearningController extends Controller
         $categories = Category::query()->where('is_active', true)->with(['lessons' => function ($query) use ($studentId) {
             $query->where('is_published', true)->with([
                 'progress' => fn ($progress) => $progress->where('student_id', $studentId),
-                'realizations' => fn ($realizations) => $realizations->where('student_id', $studentId),
+                'realizations' => fn ($realizations) => $realizations->where('student_id', $studentId)->orderByDesc('id'),
             ]);
         }])->orderBy('sort_order')->orderBy('id')->get();
         $categories = $categories->map(function (Category $category) use ($studentId) {
@@ -43,6 +47,8 @@ class LearningController extends Controller
                     'sort_order' => $lesson->sort_order,
                     'is_unlocked' => $isUnlocked,
                     'realization_submitted' => $hasRealization,
+                    'realization_questions' => $lesson->realizations->first()?->questions,
+                    'realization_text' => $lesson->realizations->first()?->realization,
                     'progress' => $progress ? ['last_position_seconds' => $progress->last_position_seconds, 'watched_seconds' => $progress->watched_seconds, 'progress_percentage' => $progress->progress_percentage, 'is_completed' => $progress->is_completed, 'last_watched_at' => $progress->last_watched_at] : null,
                 ];
             });
@@ -56,7 +62,43 @@ class LearningController extends Controller
             $eligible = $required && $request->user()->lessonProgress()->where('lesson_id', $required->id)->where('is_completed', true)->exists();
         }
         $form = $request->user()->enrollmentForms()->latest('revision')->first();
-        return response()->json(['categories' => $categories, 'enrollment' => ['eligible'=>(bool)$eligible, 'requirement_enabled'=>(bool)($setting->enabled ?? false), 'category_name'=>Category::find($setting->category_id ?? 0)?->name, 'lesson_number'=>(int)($setting->lesson_number ?? 0), 'status'=>$form?->status ?? 'not_started', 'revision_reason'=>$form?->revision_reason]]);
+        return response()->json(['categories' => $categories, 'enrollment' => ['eligible'=>(bool)$eligible, 'requirement_enabled'=>(bool)($setting->enabled ?? false), 'category_name'=>Category::find($setting->category_id ?? 0)?->name, 'lesson_number'=>(int)($setting->lesson_number ?? 0), 'status'=>$form?->status ?? 'not_started', 'revision_reason'=>$form?->revision_reason], 'milestone' => $this->milestoneFor($request->user())]);
+    }
+
+    public function submitMilestoneResponse(Request $request)
+    {
+        $data = $request->validate(['response' => ['required','string','min:3','max:10000']]);
+        $student = $request->user();
+        $settings = json_decode((string) SiteSetting::where('key', 'lesson_milestone')->value('value'), true) ?: [];
+        abort_unless(($settings['enabled'] ?? false) && !empty($settings['lesson_id']) && !empty($settings['zoom_session_id']), 404);
+        abort_unless($student->lessonProgress()->where('lesson_id', $settings['lesson_id'])->where('is_completed', true)->exists(), 403, 'Complete the milestone lesson before submitting a response.');
+        $session = ZoomSession::find($settings['zoom_session_id']);
+        abort_unless($session && $session->scheduled_at && $session->scheduled_at->isFuture(), 422, 'This milestone meeting is no longer upcoming.');
+        $key = hash('sha256', $settings['lesson_id'].'|'.$settings['zoom_session_id']);
+        $response = StudentMilestoneResponse::firstOrCreate(['student_id' => $student->id, 'milestone_key' => $key], [
+            'lesson_id' => $settings['lesson_id'], 'zoom_session_id' => $session->id, 'scheduled_at' => $session->scheduled_at,
+            'response' => trim($data['response']), 'submitted_at' => now(),
+        ]);
+        return response()->json(['submitted' => true, 'response' => $response->response], $response->wasRecentlyCreated ? 201 : 200);
+    }
+
+    private function milestoneFor(User $student): ?array
+    {
+        $settings = json_decode((string) SiteSetting::where('key', 'lesson_milestone')->value('value'), true) ?: [];
+        if (!($settings['enabled'] ?? false) || empty($settings['lesson_id']) || empty($settings['zoom_session_id'])) return null;
+        $session = ZoomSession::whereKey($settings['zoom_session_id'])->where('is_active', true)->whereNotNull('zoom_meeting_id')->first();
+        if (!$session || !$session->scheduled_at || $session->scheduled_at->isPast()) return null;
+        $lesson = Lesson::find($settings['lesson_id']);
+        if (!$lesson) return null;
+        $completed = $student->lessonProgress()->where('lesson_id', $lesson->id)->where('is_completed', true)->exists();
+        if (!$completed) return null;
+        $key = hash('sha256', $lesson->id.'|'.$session->id);
+        $saved = StudentMilestoneResponse::where('student_id', $student->id)->where('milestone_key', $key)->first();
+        $assignment = $student->zoomAssignments()->where('zoom_session_id', $session->id)->where('registration_status', 'registered')->first();
+        return ['key' => $key, 'lesson_id' => $lesson->id, 'lesson_title' => $lesson->title,
+            'message' => $settings['message'] ?? '', 'image_url' => !empty($settings['image_path']) ? Storage::disk('public')->url($settings['image_path']) : null,
+            'scheduled_at' => $session->scheduled_at, 'response_submitted' => (bool)$saved,
+            'response' => $saved?->response, 'join_url' => $assignment?->zoom_url];
     }
 
     public function myZoom(Request $request)
@@ -249,7 +291,7 @@ class LearningController extends Controller
         return max(120, (int) config('video.playback_session_minutes', 180));
     }
 
-    public function saveProgress(Request $request, Lesson $lesson)
+    public function saveProgress(Request $request, Lesson $lesson, StudentPaceGroupAssigner $paceGroups)
     {
         abort_unless(StudentLessonAccess::allows($request->user()->id, $lesson->id), 404);
         $data = $request->validate([
@@ -261,7 +303,8 @@ class LearningController extends Controller
         $position = min($data['position_seconds'], $duration);
         $now = now();
 
-        $progress = DB::transaction(function () use ($request, $lesson, $position, $duration, $data, $now) {
+        $newlyCompleted = false;
+        $progress = DB::transaction(function () use ($request, $lesson, $position, $duration, $data, $now, &$newlyCompleted) {
             $progress = StudentLessonProgress::where('student_id', $request->user()->id)
                 ->where('lesson_id', $lesson->id)
                 ->lockForUpdate()
@@ -291,6 +334,7 @@ class LearningController extends Controller
 
             $complete = $progress->watched_seconds >= (int) ceil($duration * 0.5);
             if ($complete) {
+                $newlyCompleted = !$progress->is_completed;
                 $progress->is_completed = true;
                 $progress->completed_at ??= $now;
             }
@@ -300,6 +344,8 @@ class LearningController extends Controller
 
             return $progress->fresh();
         });
+
+        if ($newlyCompleted) $paceGroups->recalculateStudent($request->user()->id);
 
         return response()->json(['progress' => $progress]);
     }

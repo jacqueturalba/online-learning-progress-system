@@ -40,12 +40,12 @@ function fakeVideo(string $name = 'lesson.mp4'): UploadedFile
 }
 
 it('registers a student and ignores an attempted admin role', function () {
-    $response = $this->postJson('/register', ['name' => 'New Student', 'email' => 'new@example.test', 'password' => 'StrongPass123!', 'password_confirmation' => 'StrongPass123!', 'country'=>'Philippines','address'=>'Manila','phone_country_code'=>'+63','phone_number'=>'9123456789','role' => 'admin', 'pseudocode' => 'STU-ATTACKER']);
+    $response = $this->postJson('/register', ['name' => 'New Student', 'email' => 'new@example.test', 'password' => 'StrongPass123!', 'password_confirmation' => 'StrongPass123!', 'country'=>'Philippines','address'=>'Manila','phone_country_code'=>'+63','phone_number'=>'9123456789','who_invited'=>'N/A','role' => 'admin', 'pseudocode' => 'STU-ATTACKER']);
 
     $response->assertCreated()->assertJsonPath('user.role', 'student');
     $this->assertAuthenticated();
     expect(User::where('email', 'new@example.test')->value('role'))->toBe('student');
-    expect(User::where('email', 'new@example.test')->first()->only('country','address','phone_country_code','phone_number'))->toBe(['country'=>'Philippines','address'=>'Manila','phone_country_code'=>'+63','phone_number'=>'9123456789']);
+    expect(User::where('email', 'new@example.test')->first()->only('country','address','phone_country_code','phone_number','who_invited'))->toBe(['country'=>'Philippines','address'=>'Manila','phone_country_code'=>'+63','phone_number'=>'9123456789','who_invited'=>'N/A']);
     expect(User::where('email', 'new@example.test')->value('pseudocode'))->not->toBe('STU-ATTACKER');
     $response->assertJsonMissingPath('user.pseudocode');
     $this->getJson('/api/me')->assertJsonMissingPath('user.pseudocode')->assertJsonMissingPath('user.pace_group');
@@ -133,8 +133,12 @@ it('lists students with server-side search, category and pace filters, and pagin
     $admin = makeAdmin();
     $category = makeCategory();
     $student = makeStudent('searchable@example.test');
-    $student->update(['name' => 'Sam Searchable', 'pace_group' => 'A']);
+    $student->update(['name' => 'Sam Searchable']);
     StudentCategoryProgress::create(['student_id' => $student->id, 'category_id' => $category->id, 'started_at' => now()]);
+    foreach (range(1, 4) as $number) {
+        $lesson = makeLesson($category, "Completed lesson {$number}", $number);
+        StudentLessonProgress::create(['student_id' => $student->id, 'lesson_id' => $lesson->id, 'is_completed' => true, 'completed_at' => now()]);
+    }
 
     foreach (range(1, 25) as $number) {
         makeStudent("page-{$number}@example.test");
@@ -152,7 +156,7 @@ it('lists students with server-side search, category and pace filters, and pagin
     $this->getJson('/api/admin/students')->assertJsonPath('students.per_page', 25)->assertJsonPath('students.total', 26)->assertJsonPath('students.last_page', 2);
 });
 
-it('shows private student history and active batch Zoom access to admins and allows pace changes only', function () {
+it('shows private student history and automatic pace group to admins without manual group editing', function () {
     $admin = makeAdmin();
     $student = makeStudent();
     $category = makeCategory();
@@ -179,6 +183,8 @@ it('shows private student history and active batch Zoom access to admins and all
         ->assertJsonPath('student.email', $student->email)
         ->assertJsonPath('student.personal_information.real_name', $student->name)
         ->assertJsonPath('student.pseudocode', $student->pseudocode)
+        ->assertJsonPath('student.pace_group', null)
+        ->assertJsonPath('student.pace_completed_count', 1)
         ->assertJsonPath('student.current_category.name', $category->name)
         ->assertJsonPath('student.current_category.completed_lessons', 1)
         ->assertJsonPath('student.learning_history.0.lessons.0.title', $lesson->title)
@@ -189,12 +195,9 @@ it('shows private student history and active batch Zoom access to admins and all
 
     $details->assertJsonPath('student.is_active', true);
     $this->putJson("/api/admin/students/{$student->id}/pace-group", ['pace_group' => 'A', 'pseudocode' => 'STU-CHANGED'])
-        ->assertOk()->assertJsonPath('pace_group', 'A')->assertJsonPath('weekly_target', 4);
+        ->assertNotFound();
     expect($student->fresh()->pseudocode)->toBe($details->json('student.pseudocode'));
-    expect($student->fresh()->pace_group)->toBe('A');
-
-    $this->putJson("/api/admin/students/{$student->id}/pace-group", ['pace_group' => 'unbounded'])->assertUnprocessable()->assertJsonValidationErrors('pace_group');
-    $this->actingAs($student)->putJson("/api/admin/students/{$student->id}/pace-group", ['pace_group' => 'C'])->assertForbidden();
+    expect($student->fresh()->pace_group)->toBeNull();
     expect(fn () => $student->fresh()->forceFill(['pseudocode' => 'STU-CHANGED'])->save())->toThrow(LogicException::class);
     $this->actingAs($student)->getJson('/api/me')->assertJsonMissingPath('user.pseudocode')->assertJsonMissingPath('user.is_active');
 });

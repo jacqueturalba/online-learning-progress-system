@@ -3,6 +3,7 @@
 use App\Models\Category;
 use App\Models\Lesson;
 use App\Models\StudentRealization;
+use App\Models\StudentCategoryProgress;
 use App\Models\User;
 use App\Models\ZoomBatch;
 use App\Models\ZoomBatchMembership;
@@ -42,6 +43,69 @@ it('stores a realization for the authenticated student and rejects invalid submi
 
     $this->postJson("/api/lessons/{$lesson->id}/realizations", ['realization' => ' '])
         ->assertUnprocessable()->assertJsonValidationErrors('realization');
+});
+
+it('stores optional questions with a realization and lets a student add them later', function () {
+    $student = realizationStudent('questions-owner@example.test');
+    $category = Category::create(['name' => 'Questions Category', 'sort_order' => 1, 'is_active' => true]);
+    $lesson = realizationLesson($category, 'Questions lesson');
+    $this->actingAs($student)->postJson("/api/lessons/{$lesson->id}/realizations", [
+        'realization' => 'I understood the central idea.', 'questions' => 'How should I apply this in my work?',
+    ])->assertCreated();
+    $this->putJson("/api/lessons/{$lesson->id}/realization-questions", ['questions' => 'Can you explain the second example?'])->assertOk();
+    expect(StudentRealization::where('student_id', $student->id)->where('lesson_id', $lesson->id)->count())->toBe(1)
+        ->and(StudentRealization::where('student_id', $student->id)->first()->questions)->toBe('Can you explain the second example?');
+});
+
+it('updates an existing realization and its questions without creating another submission', function () {
+    $student = realizationStudent('update-existing@example.test');
+    $category = Category::create(['name' => 'Editable Category', 'sort_order' => 1, 'is_active' => true]);
+    $lesson = realizationLesson($category, 'Editable lesson');
+    $this->actingAs($student)->postJson("/api/lessons/{$lesson->id}/realizations", [
+        'realization' => 'The first realization text.', 'questions' => 'First question?',
+    ])->assertCreated();
+    $original = StudentRealization::firstOrFail();
+
+    $this->putJson("/api/lessons/{$lesson->id}/realizations", [
+        'realization' => 'An updated realization text.', 'questions' => 'A revised question?',
+    ])->assertOk()->assertJsonPath('realization.id', $original->id)
+        ->assertJsonPath('realization.realization', 'An updated realization text.')
+        ->assertJsonPath('realization.questions', 'A revised question?');
+
+    $this->postJson("/api/lessons/{$lesson->id}/realizations", [
+        'realization' => 'A repeated submit updates the same row.', 'questions' => '',
+    ])->assertOk()->assertJsonPath('realization.id', $original->id);
+    expect(StudentRealization::where('student_id', $student->id)->where('lesson_id', $lesson->id)->count())->toBe(1)
+        ->and($original->fresh()->realization)->toBe('A repeated submit updates the same row.')
+        ->and($original->fresh()->questions)->toBeNull();
+
+    $this->putJson("/api/lessons/{$lesson->id}/realizations", ['realization' => 'x', 'questions' => str_repeat('q', 10001)])
+        ->assertUnprocessable()->assertJsonValidationErrors(['realization', 'questions']);
+});
+
+it('includes the correct latest realization in its student lesson history', function () {
+    $admin = realizationAdmin();
+    $student = realizationStudent('history-realization@example.test');
+    $category = Category::create(['name' => 'History Category', 'sort_order' => 1, 'is_active' => true]);
+    $lesson = realizationLesson($category, 'History lesson');
+    StudentCategoryProgress::create(['student_id' => $student->id, 'category_id' => $category->id, 'started_at' => now()]);
+    StudentRealization::create(['student_id' => $student->id, 'lesson_id' => $lesson->id, 'realization' => 'Current realization.', 'questions' => 'Current question?', 'submitted_at' => now()]);
+
+    $this->actingAs($admin)->getJson("/api/admin/students/{$student->id}")->assertOk()
+        ->assertJsonPath('student.learning_history.0.lessons.0.realization', 'Current realization.')
+        ->assertJsonPath('student.learning_history.0.lessons.0.questions', 'Current question?');
+});
+
+it('returns the saved realization and questions to the student learning view', function () {
+    $student = realizationStudent('learning-view-realization@example.test');
+    $category = Category::create(['name' => 'Student View Category', 'sort_order' => 1, 'is_active' => true]);
+    $lesson = realizationLesson($category, 'Student View lesson');
+    StudentRealization::create(['student_id' => $student->id, 'lesson_id' => $lesson->id, 'realization' => 'Previously saved realization.', 'questions' => 'Previously saved question?', 'submitted_at' => now()]);
+
+    $this->actingAs($student)->getJson('/api/learning')->assertOk()
+        ->assertJsonPath('categories.0.lessons.0.realization_submitted', true)
+        ->assertJsonPath('categories.0.lessons.0.realization_text', 'Previously saved realization.')
+        ->assertJsonPath('categories.0.lessons.0.realization_questions', 'Previously saved question?');
 });
 
 it('isolates realization submissions from other authenticated request throttles', function () {

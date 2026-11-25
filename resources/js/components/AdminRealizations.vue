@@ -3,10 +3,11 @@ import { computed, onMounted, ref } from 'vue';
 import { ChevronDown, ChevronRight, Clock3, Search } from '@lucide/vue';
 
 type Choice = { id: number; name?: string; title?: string; category_id?: number; deleted_at?: string | null };
-type Realization = { id: number; lesson_id: number; lesson_title: string; category_name: string; realization: string; submitted_at: string };
+type Realization = { id: number; lesson_id: number; lesson_title: string; category_name: string; realization: string; questions?: string|null; submitted_at: string };
 type RealizationStudent = { id: number; student_id: number; student_name: string; student_email: string; pseudocode: string; batch_id: number | null; batch_name: string; realization_count: number; realizations: Realization[] };
-type LearningCategory = { id: number; name: string; completed_lessons: number; total_lessons: number; progress_percentage: number; lessons: { id: number; title: string; is_completed: boolean; progress_percentage: number; last_watched_at: string | null }[] };
+type LearningCategory = { id: number; name: string; completed_lessons: number; total_lessons: number; progress_percentage: number; lessons: { id: number; title: string; is_completed: boolean; progress_percentage: number; last_watched_at: string | null; realization?: string | null; questions?: string | null; realization_submitted_at?: string | null }[] };
 const rows = ref<RealizationStudent[]>([]), categories = ref<Choice[]>([]), lessons = ref<Choice[]>([]);
+const milestoneResponses = ref<any[]>([]);
 const batches = ref<Choice[]>([]), batchId = ref('');
 const student = ref(''), categoryId = ref(''), lessonId = ref(''), dateFrom = ref(''), dateTo = ref('');
 const page = ref(1), lastPage = ref(1), total = ref(0), loading = ref(false), error = ref('');
@@ -53,11 +54,13 @@ async function openContext(item: RealizationStudent) {
   finally { historyLoading.value = false; }
 }
 function formatDate(value: string) { return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)); }
-onMounted(() => void load(1));
+async function loadMilestoneResponses(){try{const r=await fetch('/api/admin/lesson-milestone/responses',{credentials:'same-origin',headers:{Accept:'application/json'}});const b=await r.json();if(r.ok)milestoneResponses.value=b.responses||[]}catch{ /* Main submissions remain available if this optional panel fails. */ }}
+onMounted(() => { void load(1); void loadMilestoneResponses(); });
 </script>
 
 <template>
   <section class="admin-realizations-page">
+    <section class="realization-panel milestone-responses-panel"><div class="realization-summary"><h2>Zoom discussion questions and expectations</h2><span>{{milestoneResponses.length}} responses</span></div><div v-if="!milestoneResponses.length" class="category-empty-state">No milestone responses have been submitted.</div><article v-for="response in milestoneResponses" :key="response.id" class="milestone-response-card"><div><b>{{response.student_name}}</b><span>{{response.pseudocode}} · {{response.student_email}} · {{response.lesson_title}}</span><span>{{response.zoom_session_title||'Zoom session'}} · Scheduled {{formatDate(response.scheduled_at)}}</span><span>Submitted {{formatDate(response.submitted_at)}}</span></div><p>{{response.response}}</p></article></section>
     <div class="realization-panel">
       <div class="realization-toolbar">
         <label class="realization-search"><Search :size="17" /><input v-model="student" type="search" placeholder="Search student or pseudocode" aria-label="Search student" @input="scheduleSearch"></label>
@@ -75,7 +78,7 @@ onMounted(() => void load(1));
       <div v-else class="realization-table-wrap">
         <table class="realization-table"><thead><tr><th>Student</th><th>Batch</th><th>Realizations</th><th>Learning Context</th></tr></thead>
           <tbody><template v-for="item in rows" :key="item.student_id"><tr><td><strong>{{ item.student_name }}</strong><small>{{ item.pseudocode }} · {{ item.student_email }}</small></td><td>{{ item.batch_name || 'No batch assigned' }}</td><td>{{ item.realization_count }} {{ item.realization_count === 1 ? 'lesson submission' : 'lesson submissions' }}</td><td><button class="category-action" :aria-expanded="selectedId === item.student_id" @click="openContext(item)">{{ selectedId === item.student_id ? 'Close context' : 'View Realization' }} <ChevronDown v-if="selectedId === item.student_id" :size="14" /><ChevronRight v-else :size="14" /></button></td></tr>
-            <tr v-if="selectedId === item.student_id" class="realization-context-row"><td colspan="4"><div v-if="historyLoading" class="category-empty-state">Loading learning history…</div><p v-else-if="historyError" class="student-error" role="alert">{{ historyError }}</p><div v-else class="realization-context"><h3>Learning context for {{ item.student_name }}</h3><section class="realization-submissions"><h4>Submitted realizations</h4><div v-if="!item.realizations.length" class="category-empty-state">No realization submissions recorded.</div><article v-for="submission in item.realizations" :key="submission.id"><div><b>{{ submission.lesson_title }}</b><span>{{ submission.category_name }} · Submitted {{ formatDate(submission.submitted_at) }}</span></div><p class="realization-text">{{ submission.realization }}</p></article></section><article v-for="category in history" :key="category.id"><div><b>{{ category.name }}</b><span>{{ category.completed_lessons }}/{{ category.total_lessons }} completed · {{ category.progress_percentage }}%</span></div><ul><li v-for="lesson in category.lessons" :key="lesson.id"><span>{{ lesson.title }}</span><span>{{ lesson.is_completed ? 'Completed' : lesson.progress_percentage ? `${lesson.progress_percentage}% watched` : 'Not completed' }}</span></li></ul></article></div></td></tr>
+            <tr v-if="selectedId === item.student_id" class="realization-context-row"><td colspan="4"><div v-if="historyLoading" class="category-empty-state">Loading learning history…</div><p v-else-if="historyError" class="student-error" role="alert">{{ historyError }}</p><div v-else class="realization-context"><article v-for="category in history" :key="category.id"><div><b>{{ category.name }}</b><span>{{ category.completed_lessons }}/{{ category.total_lessons }} completed · {{ category.progress_percentage }}%</span></div><ul><li v-for="lesson in category.lessons" :key="lesson.id" class="realization-lesson"><div class="realization-lesson-heading"><span><strong>{{ lesson.title }}</strong><small>{{ lesson.is_completed ? 'Completed' : lesson.progress_percentage ? `${lesson.progress_percentage}% watched` : 'Not completed' }}</small></span><span class="realization-completion">{{ lesson.progress_percentage }}% complete</span></div><p v-if="lesson.realization" class="realization-text">{{ lesson.realization }}</p><div v-if="lesson.questions" class="student-question-response"><b>Student questions</b><p>{{ lesson.questions }}</p></div></li></ul></article></div></td></tr>
           </template></tbody>
         </table>
       </div>

@@ -3,6 +3,7 @@ import { onMounted, onUnmounted, reactive, ref } from 'vue';
 import { subtitleWorkflowPollingState } from '../utils/subtitlePolling';
 import { reconcileServerDraft } from '../utils/subtitleDrafts';
 import { parseSubtitleSrt, renderSubtitleSrt, subtitleSections, type SubtitleCue, type SubtitleSection } from '../utils/subtitleEditor';
+import AdminLessonMilestone from './AdminLessonMilestone.vue';
 
 type Category = { id: number; name: string; deleted_at: string | null };
 type Lesson = { id: number; category_id: number; title: string; description: string | null; video_stream_url: string | null; thumbnail_url: string | null; duration_seconds: number | null; sort_order: number; is_published: boolean; deleted_at: string | null; progress_count: number; category?: Category };
@@ -487,6 +488,7 @@ onUnmounted(() => { stopSubtitlePolling(); window.removeEventListener('beforeunl
   <div v-else class="admin-lessons-page">
     <section class="lesson-editor-panel">
       <div class="category-editor-heading"><div><p class="eyebrow">VIDEO LIBRARY</p><h2>{{ editing ? 'Edit lesson' : 'Add lesson' }}</h2></div><button v-if="editing" class="secondary-button" type="button" @click="resetForm">Cancel</button></div>
+      <AdminLessonMilestone />
       <form class="lesson-editor-form" @submit.prevent="save">
         <label>Category<select v-model="form.category_id" required><option value="" disabled>Select category</option><option v-for="category in categories.filter(item => !item.deleted_at)" :key="category.id" :value="String(category.id)">{{ category.name }}</option></select></label>
         <label>Title<input v-model.trim="form.title" maxlength="180" required placeholder="Lesson title"></label>

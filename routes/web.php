@@ -31,6 +31,9 @@ Route::get('/api/lessons/{lesson}/subtitles', [App\Http\Controllers\StudentSubti
 Route::get('/api/lessons/{lesson}/subtitles/{language}', [App\Http\Controllers\StudentSubtitleController::class, 'track'])->whereIn('language', ['en', 'fil'])->middleware(['auth', 'role:student', 'throttle:120,1'])->name('lessons.subtitles.track');
 Route::put('/api/lessons/{lesson}/progress', [LearningController::class, 'saveProgress'])->middleware(['auth', 'role:student', 'throttle:60,1']);
 Route::post('/api/lessons/{lesson}/realizations', [App\Http\Controllers\StudentRealizationController::class, 'store'])->middleware(['auth', 'role:student', 'throttle:10,1,student-realizations:']);
+Route::put('/api/lessons/{lesson}/realizations', [App\Http\Controllers\StudentRealizationController::class, 'update'])->middleware(['auth', 'role:student', 'throttle:10,1,student-realizations:']);
+Route::put('/api/lessons/{lesson}/realization-questions', [App\Http\Controllers\StudentRealizationController::class, 'updateQuestions'])->middleware(['auth', 'role:student', 'throttle:10,1']);
+Route::post('/api/lesson-milestone-response', [LearningController::class, 'submitMilestoneResponse'])->middleware(['auth', 'role:student', 'throttle:5,1']);
 Route::prefix('/admin')->middleware(['auth', 'role:admin'])->group(function () {
     Route::get('/{section?}', fn () => view('app'))
         ->whereIn('section', ['dashboard', 'students', 'categories', 'lessons', 'zoom', 'progress', 'realizations', 'reports', 'settings'])
@@ -55,6 +58,12 @@ Route::prefix('/api/admin')->middleware(['auth', 'role:admin'])->group(function 
     Route::get('/dashboard', App\Http\Controllers\AdminDashboardController::class);
     Route::get('/students', [App\Http\Controllers\AdminStudentController::class, 'index']);
     Route::get('/students/{student}', [App\Http\Controllers\AdminStudentController::class, 'show']);
+    Route::put('/students/{student}', [App\Http\Controllers\AdminStudentController::class, 'update']);
+    Route::patch('/students/{student}/archive', [App\Http\Controllers\AdminStudentController::class, 'archive']);
+    Route::delete('/students/{student}', [App\Http\Controllers\AdminStudentController::class, 'destroy']);
+    Route::get('/lesson-milestone', [App\Http\Controllers\AdminLessonMilestoneController::class, 'show']);
+    Route::put('/lesson-milestone', [App\Http\Controllers\AdminLessonMilestoneController::class, 'update']);
+    Route::get('/lesson-milestone/responses', [App\Http\Controllers\AdminLessonMilestoneController::class, 'responses']);
     Route::get('/enrollment-settings', [App\Http\Controllers\AdminEnrollmentController::class, 'settings']);
     Route::put('/enrollment-settings', [App\Http\Controllers\AdminEnrollmentController::class, 'saveSettings']);
     Route::get('/students/{student}/enrollment', [App\Http\Controllers\AdminEnrollmentController::class, 'show']);
@@ -62,7 +71,6 @@ Route::prefix('/api/admin')->middleware(['auth', 'role:admin'])->group(function 
     Route::post('/students/{student}/enrollment/review', [App\Http\Controllers\AdminEnrollmentController::class, 'review']);
     Route::post('/students/enrollment/export', [App\Http\Controllers\AdminEnrollmentController::class, 'export']);
     Route::post('/students/enrollment/print', [App\Http\Controllers\AdminEnrollmentController::class, 'print']);
-    Route::put('/students/{student}/pace-group', [App\Http\Controllers\AdminStudentController::class, 'updatePaceGroup']);
     Route::put('/students/{student}/password', [App\Http\Controllers\AdminStudentController::class, 'updatePassword']);
     Route::post('/students/{student}/password/reset', [App\Http\Controllers\AdminStudentController::class, 'resetPassword']);
     Route::get('/branding', [App\Http\Controllers\BrandingController::class, 'show']);

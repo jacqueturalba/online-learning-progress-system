@@ -10,6 +10,16 @@ use App\Services\LessonAudioPreparationService;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Schedule;
+use App\Services\StudentPaceGroupAssigner;
+
+Artisan::command('students:recalculate-pace-groups', function (StudentPaceGroupAssigner $assigner): int {
+    $assigner->recalculateAll();
+    $this->info('Student pace groups recalculated from lesson completion records.');
+    return 0;
+})->purpose('Recalculate automatic student pace groups for the active calendar period');
+
+Schedule::command('students:recalculate-pace-groups')->dailyAt('00:00')->timezone(config('app.timezone'));
 
 Artisan::command('app:create-admin', function () {
     $name = trim((string) $this->ask('Admin name'));
