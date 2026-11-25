@@ -12,6 +12,10 @@ class EnsureUserHasRole
     {
         $actualRole = $request->user()?->role;
         $allowed = $role === 'admin' ? in_array($actualRole, ['admin', 'super_admin'], true) : $actualRole === $role;
+        $active = $request->user()?->getRawOriginal('is_active');
+        if ($role === 'student' && $actualRole === 'student' && $active !== null && ! (bool) $active) {
+            $allowed = false;
+        }
         abort_unless($allowed, 403);
         return $next($request);
     }

@@ -1,7 +1,12 @@
 <?php
 
 use App\Jobs\PrepareLessonAudioForSubtitles;
+use App\Jobs\RunWhisperxAlignment;
 use App\Services\AiOperationService;
+use App\Services\SubtitleSrtCueService;
+use App\Support\AiProvider;
+use App\Support\AiProviderRegistry;
+use App\Support\SubtitleCueTranslationProvider;
 use App\Services\LessonAudioPreparationException;
 use App\Services\LessonAudioPreparationService;
 use App\Models\AiIntegration;
@@ -44,6 +49,7 @@ function subtitleWorkflowAssignment(string $service, ?string $targetLanguage = n
 it('queues private audio preparation once and keeps workflow actions admin-only', function () {
     Storage::fake('local');
     config(['queue.default' => 'database', 'whisperx.connection' => 'whisperx', 'whisperx.queue' => 'whisperx-alignment']);
+    config(['whisperx.enabled' => false, 'whisperx.python_binary' => 'C:/missing-python/python.exe']);
     $lesson = subtitleWorkflowLesson();
     Storage::disk('local')->put('lesson-videos/subtitle-workflow.mp4', 'private video fixture');
     $lesson->update(['video_path' => 'lesson-videos/subtitle-workflow.mp4']);
@@ -57,6 +63,7 @@ it('queues private audio preparation once and keeps workflow actions admin-only'
     $this->postJson('/api/admin/lessons/'.$lesson->id.'/subtitle-workflow/transcribe')
         ->assertOk()->assertJsonPath('already_submitted', true);
     Queue::assertPushed(PrepareLessonAudioForSubtitles::class, 1);
+    Queue::assertNotPushed(RunWhisperxAlignment::class);
     $job = Queue::pushed(PrepareLessonAudioForSubtitles::class)->first();
     expect($job->connection)->toBe('whisperx')->and($job->queue)->toBe('whisperx-alignment')
         ->and($job->timeout)->toBe(3600);
@@ -147,24 +154,112 @@ it('saves and approves the edited transcript snapshot and requires its approved 
     expect($transcript->fresh()->result['transcript_review']['approved_text'])->toBe('Reviewed wording!');
 
     subtitleWorkflowAssignment('translation', 'Filipino');
-    $this->postJson('/api/admin/lessons/'.$lesson->id.'/transcripts/'.$transcript->id.'/translate')
+    $this->postJson('/api/admin/lessons/'.$lesson->id.'/transcripts/'.$transcript->id.'/translate', [
+        'source_alignment_operation_id' => 999, 'source_english_srt_version_id' => (string) str()->uuid(),
+    ])
         ->assertUnprocessable()->assertJsonValidationErrors('translation');
 
-    AiOperationUsage::query()->create([
+    $englishSrt = "1\n00:00:01,000 --> 00:00:02,000\nReviewed wording!\n";
+    $englishPath = 'approved-subtitles/'.$lesson->id.'/alignment/en/source.srt';
+    Storage::disk('local')->put($englishPath, $englishSrt);
+    $englishVersionId = (string) str()->uuid();
+    $alignment = AiOperationUsage::query()->create([
         'service' => 'whisperx_alignment', 'model' => 'whisperx-3.8.6', 'lesson_id' => $lesson->id,
         'status' => 'succeeded', 'idempotency_key' => 'workflow-alignment-'.str()->uuid(),
         'request_fingerprint' => hash('sha256', 'alignment'), 'result' => [
             'transcript_operation_id' => $transcript->id,
             'transcript_sha256' => hash('sha256', 'Reviewed wording!'),
             'approval_statuses' => ['en' => 'approved'],
-            'subtitle_versions' => ['en' => ['current_approved_version_id' => (string) str()->uuid()]],
+            'subtitle_versions' => ['en' => ['current_approved_version_id' => $englishVersionId, 'versions' => [[
+                'version_id' => $englishVersionId, 'path' => $englishPath, 'sha256' => hash('sha256', $englishSrt),
+            ]]]],
         ],
     ]);
     Queue::fake();
-    $this->postJson('/api/admin/lessons/'.$lesson->id.'/transcripts/'.$transcript->id.'/translate')
+    $this->postJson('/api/admin/lessons/'.$lesson->id.'/transcripts/'.$transcript->id.'/translate', [
+        'source_alignment_operation_id' => $alignment->id, 'source_english_srt_version_id' => $englishVersionId,
+    ])
         ->assertAccepted()->assertJsonPath('status', 'queued');
     $translation = AiOperationUsage::query()->where('service', 'translation')->firstOrFail();
     expect($translation->result['target_language'])->toBe('Filipino')
         ->and($translation->result['source_transcript_operation_id'])->toBe($transcript->id)
         ->and($translation->result['source_transcript_sha256'])->toBe(hash('sha256', 'Reviewed wording!'));
+});
+
+it('translates each approved English SRT cue and approves Filipino using identical timestamps without an upload', function () {
+    Storage::fake('local');
+    config(['queue.default' => 'database']);
+    $lesson = subtitleWorkflowLesson();
+    $admin = subtitleWorkflowUser('admin');
+    subtitleWorkflowAssignment('translation', 'Filipino');
+    $englishText = 'In the beginning. God created the heavens.';
+    $transcript = AiOperationUsage::query()->create([
+        'service' => 'transcription', 'model' => 'whisper-1', 'lesson_id' => $lesson->id,
+        'status' => 'succeeded', 'idempotency_key' => 'cue-transcript-'.str()->uuid(),
+        'request_fingerprint' => hash('sha256', $englishText), 'result' => ['text' => $englishText,
+            'transcript_review' => ['status' => 'approved', 'language' => 'en', 'approved_text' => $englishText]],
+    ]);
+    $englishSrt = "1\n00:00:01,125 --> 00:00:02,250\nIn the beginning.\n\n2\n00:00:02,300 --> 00:00:03,875\nGod created the heavens.\n";
+    $englishPath = 'approved-subtitles/'.$lesson->id.'/71/en/approved.srt';
+    Storage::disk('local')->put($englishPath, $englishSrt);
+    $versionId = (string) str()->uuid();
+    $alignment = AiOperationUsage::query()->create([
+        'service' => 'whisperx_alignment', 'model' => 'whisperx-3.8.6', 'lesson_id' => $lesson->id,
+        'status' => 'succeeded', 'idempotency_key' => 'cue-alignment-'.str()->uuid(),
+        'request_fingerprint' => hash('sha256', 'cue alignment'), 'result' => [
+            'transcript_operation_id' => $transcript->id, 'transcript_sha256' => hash('sha256', $englishText),
+            'approval_statuses' => ['en' => 'approved'], 'subtitle_versions' => ['en' => [
+                'current_approved_version_id' => $versionId,
+                'versions' => [['version_id' => $versionId, 'path' => $englishPath, 'sha256' => hash('sha256', $englishSrt)]],
+            ]],
+        ],
+    ]);
+    Queue::fake();
+    $admin->refresh();
+    $this->actingAs($admin)->postJson('/api/admin/lessons/'.$lesson->id.'/transcripts/'.$transcript->id.'/translate', [
+        'source_alignment_operation_id' => $alignment->id, 'source_english_srt_version_id' => $versionId,
+    ])->assertAccepted()->assertJsonPath('target_language', 'Filipino');
+    $this->postJson('/api/admin/lessons/'.$lesson->id.'/transcripts/'.$transcript->id.'/translate', [
+        'source_alignment_operation_id' => $alignment->id, 'source_english_srt_version_id' => $versionId,
+    ])->assertOk()->assertJsonPath('already_submitted', true);
+    Queue::assertPushed(App\Services\RunAiOperation::class, 1);
+    $translation = AiOperationUsage::query()->where('service', 'translation')->firstOrFail();
+    expect($translation->result['source_english_srt_sha256'])->toBe(hash('sha256', $englishSrt))
+        ->and($translation->result['source_alignment_operation_id'])->toBe($alignment->id);
+
+    $provider = new class implements AiProvider, SubtitleCueTranslationProvider {
+        public function key(): string { return 'openai'; }
+        public function name(): string { return 'test'; }
+        public function capabilities(): array { return ['translation']; }
+        public function credentialFields(): array { return []; }
+        public function supportedModels(string $service): array { return ['gpt-4o-mini']; }
+        public function testConnection(array $configuration, array $credentials): array { return []; }
+        public function transcribe(array $configuration, array $input): array { throw new RuntimeException('Not used in this test.'); }
+        public function translate(array $configuration, array $input): array { throw new RuntimeException('Cue translation should be used.'); }
+        public function translateSubtitleCues(array $configuration, array $input): array {
+            return ['cues' => array_map(fn ($cue) => ['index' => $cue['index'], 'text' => $cue['index'] === 1 ? 'Nang pasimula.' : 'Nilikha ng Diyos ang kalangitan.'], $input['cues'])];
+        }
+    };
+    $registry = new AiProviderRegistry(); $registry->register($provider);
+    app()->instance(AiProviderRegistry::class, $registry);
+    $job = Queue::pushed(App\Services\RunAiOperation::class)->first();
+    expect($job->timeout)->toBe(600);
+    $payload = json_decode(Illuminate\Support\Facades\Crypt::decryptString($job->encryptedPayload), true, flags: JSON_THROW_ON_ERROR);
+    app(AiOperationService::class)->runQueued($translation->id, $payload);
+    $translation->refresh();
+    expect($translation->status)->toBe('succeeded')
+        ->and($translation->result['subtitle_draft']['cues'][0]['start'])->toBe('00:00:01,125')
+        ->and($translation->result['subtitle_draft']['cues'][1]['end'])->toBe('00:00:03,875');
+    $draft = Storage::disk('local')->get($translation->result['subtitle_draft']['srt_path']);
+    expect($draft)->toContain("00:00:01,125 --> 00:00:02,250\nNang pasimula.")
+        ->and($draft)->toContain("00:00:02,300 --> 00:00:03,875\nNilikha ng Diyos ang kalangitan.");
+
+    $this->putJson('/api/admin/lessons/'.$lesson->id.'/translations/'.$translation->id.'/draft', ['cues' => [
+        ['index' => 1, 'text' => 'Nang pasimula!'], ['index' => 2, 'text' => 'Nilikha ng Diyos ang kalangitan.'],
+    ]])->assertOk();
+    $this->postJson('/api/admin/lessons/'.$lesson->id.'/subtitles/'.$translation->id.'/fil/approve')->assertCreated();
+    $approved = app(App\Services\ApprovedSubtitleService::class)->approvedVersion($lesson, $translation->fresh(), 'fil');
+    $approvedSrt = Storage::disk('local')->get($approved['path']);
+    app(SubtitleSrtCueService::class)->assertSameTiming(app(SubtitleSrtCueService::class)->parse($englishSrt), app(SubtitleSrtCueService::class)->parse($approvedSrt));
+    expect($approvedSrt)->toContain('Nang pasimula!')->and(Storage::disk('local')->allFiles('subtitle-drafts'))->toContain($translation->result['subtitle_draft']['srt_path']);
 });

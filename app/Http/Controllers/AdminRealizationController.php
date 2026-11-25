@@ -56,7 +56,7 @@ class AdminRealizationController extends Controller
         $realizationQuery = (clone $query)->orderByDesc('student_realizations.submitted_at')->orderByDesc('student_realizations.id')
             ->select([
                 'student_realizations.id', 'student_realizations.student_id', 'student_realizations.lesson_id',
-                'student_realizations.realization', 'student_realizations.submitted_at',
+                'student_realizations.realization', 'student_realizations.questions', 'student_realizations.submitted_at',
                 'users.name as student_name', 'users.email as student_email', 'users.pseudocode',
                 'lessons.title as lesson_title', 'lessons.category_id',
                 'categories.name as category_name',
@@ -89,7 +89,7 @@ class AdminRealizationController extends Controller
                 ->where('users.role', 'student')
                 ->orderByDesc('student_realizations.submitted_at')->orderByDesc('student_realizations.id')
                 ->select(['student_realizations.id', 'student_realizations.student_id', 'student_realizations.lesson_id',
-                    'student_realizations.realization', 'student_realizations.submitted_at', 'users.name as student_name',
+                    'student_realizations.realization', 'student_realizations.questions', 'student_realizations.submitted_at', 'users.name as student_name',
                     'users.email as student_email', 'users.pseudocode', 'lessons.title as lesson_title', 'lessons.category_id',
                     'categories.name as category_name'])->get()->groupBy('student_id');
         }
@@ -103,7 +103,7 @@ class AdminRealizationController extends Controller
                 'batch_name' => $batch?->batch_name ?? 'No batch assigned', 'batch_id' => $batch?->batch_id,
                 'realizations' => $submissions->map(fn ($item) => [
                     'id' => $item->id, 'lesson_id' => $item->lesson_id, 'lesson_title' => $item->lesson_title,
-                    'category_name' => $item->category_name, 'realization' => $item->realization,
+                    'category_name' => $item->category_name, 'realization' => $item->realization, 'questions' => $item->questions,
                     'submitted_at' => $item->submitted_at,
                 ])->values()];
         }));

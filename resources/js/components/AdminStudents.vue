@@ -2,16 +2,16 @@
 import { computed, onMounted, ref } from 'vue';
 import { Check, ChevronLeft, ChevronRight, Clock3, ExternalLink, Eye, Search, UserRound, X } from '@lucide/vue';
 
-type PaceOption = { value: string; label: string; weekly_target: number };
+type PaceOption = { value: string; label: string; weekly_target: number; minimum_completed_lessons: number | null; measurement_period: 'weekly' | 'monthly' };
 type StudentRow = {
-  id: number; name: string; email: string; pseudocode: string; pace_group: string; weekly_target: number; is_active: boolean; registered_at: string;
+  id: number; name: string; email: string; pseudocode: string; pace_group: string | null; weekly_target: number; pace_completed_count: number; measurement_period: 'weekly'|'monthly'; is_active: boolean; registered_at: string;
   current_category: { id: number; name: string; is_active: boolean; is_archived: boolean } | null;
   progress: { completed_lessons: number; total_lessons: number; percentage: number }; enrollment_status?: string; enrollment_submitted_at?: string|null;
 };
 type StudentPage = { data: StudentRow[]; current_page: number; last_page: number; total: number };
 type StudentDetails = {
-  id: number; real_name: string; email: string; pseudocode: string; pace_group: string; weekly_target: number; is_active: boolean; registered_at: string;
-  personal_information: { real_name: string; email: string; country?:string|null; address?:string|null; phone_country_code?:string|null; phone_number?:string|null };
+  id: number; real_name: string; email: string; pseudocode: string; pace_group: string | null; weekly_target: number; pace_completed_count: number; measurement_period: 'weekly'|'monthly'; is_active: boolean; registered_at: string; who_invited?: string|null;
+  personal_information: { real_name: string; email: string; country?:string|null; address?:string|null; phone_country_code?:string|null; phone_number?:string|null; who_invited?:string|null };
   current_category: HistoryCategory | null;
   zoom_batch: { batch_id: number; batch_name: string; topic: string | null; scheduled_at: string | null; recurrence: Record<string, unknown> | null; registration_status: string; join_url: string | null; registration_error: string | null } | null;
   learning_history: HistoryCategory[];
@@ -25,16 +25,17 @@ type CategoryOption = { id: number; name: string; is_active: boolean; deleted_at
 const csrf = () => document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content || '';
 const students = ref<StudentPage | null>(null), categories = ref<CategoryOption[]>([]), paceGroups = ref<PaceOption[]>([]);
 const search = ref(''), categoryId = ref(''), paceGroup = ref('');
-const loading = ref(false), error = ref(''), detailLoading = ref(false), detailError = ref(''), selectedStudent = ref<StudentDetails | null>(null),
-  savingPace = ref(false), paceNotice = ref('');
+const loading = ref(false), error = ref(''), detailLoading = ref(false), detailError = ref(''), selectedStudent = ref<StudentDetails | null>(null);
 const updatingPassword = ref(false), resettingPassword = ref(false), passwordNotice = ref('');
-const targetDrafts = ref<Record<string, number>>({}), savingTargets = ref(false), targetNotice = ref(''), targetError = ref('');
+const editingProfile = ref(false), savingProfile = ref(false), profileDraft = ref({real_name:'',email:'',country:'',address:'',phone_country_code:'',phone_number:'',who_invited:''});
+const targetDrafts = ref<Record<string, number | null>>({}), measurementPeriod = ref<'weekly'|'monthly'>('weekly'), savingTargets = ref(false), targetNotice = ref(''), targetError = ref('');
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
 
 const currentStudents = computed(() => students.value?.data ?? []);
 const selectedIds=ref<number[]>([]), enrollmentSetting=ref({enabled:false,category_id:null as number|null,lesson_number:0}), studentRequirement=ref({enabled:false,category_id:null as number|null,lesson_number:0}), settingNotice=ref(''), settingError=ref(''), reviewForms=ref<any[]>([]), reviewStudentId=ref<number|null>(null), selectedRevision=ref<number|null>(null), revisionReason=ref('');
 const allSelected=computed(()=>currentStudents.value.length>0&&currentStudents.value.every(s=>selectedIds.value.includes(s.id)));
-const paceLabel = (value: string) => paceGroups.value.find(option => option.value === value)?.label ?? value;
+const paceLabel = (value: string | null) => value ? paceGroups.value.find(option => option.value === value)?.label ?? `Group ${value}` : 'Not Yet Grouped';
+const periodLabel = (value: 'weekly'|'monthly') => value === 'monthly' ? 'this month' : 'this week';
 function csrfHeaders() { return { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrf() }; }
 
 async function loadStudents(page = 1) {
@@ -51,7 +52,8 @@ async function loadStudents(page = 1) {
     students.value = body.students;
     categories.value = body.categories;
     paceGroups.value = body.pace_groups;
-    targetDrafts.value = Object.fromEntries(paceGroups.value.map(group => [group.value, group.weekly_target]));
+    targetDrafts.value = Object.fromEntries(paceGroups.value.map(group => [group.value, group.minimum_completed_lessons]));
+    measurementPeriod.value = paceGroups.value[0]?.measurement_period ?? 'weekly';
     selectedIds.value=[];
   } catch (caught) {
     error.value = (caught as Error).message;
@@ -77,13 +79,13 @@ async function viewStudent(id: number) {
   detailLoading.value = true;
   detailError.value = '';
   passwordNotice.value = '';
-  paceNotice.value = '';
   selectedStudent.value = null;
   try {
     const response = await fetch(`/api/admin/students/${id}`, { credentials: 'same-origin', headers: csrfHeaders() });
     const body = await response.json();
     if (!response.ok) throw new Error(body.message || 'Student details could not be loaded.');
     selectedStudent.value = body.student;
+    profileDraft.value = {real_name:body.student.real_name,email:body.student.email,country:body.student.country||'',address:body.student.address||'',phone_country_code:body.student.phone_country_code||'',phone_number:body.student.phone_number||'',who_invited:body.student.who_invited||''};
     paceGroups.value = body.pace_groups;
   } catch (caught) {
     detailError.value = (caught as Error).message;
@@ -92,28 +94,13 @@ async function viewStudent(id: number) {
   }
 }
 
-async function savePaceGroup() {
-  if (!selectedStudent.value) return;
-  savingPace.value = true;
-  paceNotice.value = '';
-  detailError.value = '';
-  try {
-    const response = await fetch(`/api/admin/students/${selectedStudent.value.id}/pace-group`, {
-      method: 'PUT', credentials: 'same-origin', headers: csrfHeaders(),
-      body: JSON.stringify({ pace_group: selectedStudent.value.pace_group }),
-    });
-    const body = await response.json();
-    if (!response.ok) throw new Error(body.message || Object.values(body.errors || {}).flat()[0] as string || 'Pace group could not be saved.');
-    selectedStudent.value.pace_group = body.pace_group;
-    selectedStudent.value.weekly_target = body.weekly_target;
-    paceNotice.value = 'Pace group updated.';
-    await loadStudents(students.value?.current_page ?? 1);
-  } catch (caught) {
-    detailError.value = (caught as Error).message;
-  } finally {
-    savingPace.value = false;
-  }
+async function saveProfile() {
+  if(!selectedStudent.value || savingProfile.value)return; savingProfile.value=true; detailError.value='';
+  try { const r=await fetch(`/api/admin/students/${selectedStudent.value.id}`,{method:'PUT',credentials:'same-origin',headers:csrfHeaders(),body:JSON.stringify({name:profileDraft.value.real_name,...profileDraft.value})}); const b=await r.json(); if(!r.ok)throw new Error(b.message||'Student information could not be saved.'); selectedStudent.value={...selectedStudent.value,...b.student,personal_information:{...selectedStudent.value.personal_information,...b.student}}; editingProfile.value=false; await loadStudents(students.value?.current_page||1); }
+  catch(e){detailError.value=(e as Error).message} finally{savingProfile.value=false}
 }
+async function setArchived(active:boolean) { if(!selectedStudent.value)return; const question=active?'Restore this student account?':'Archive this student and prevent sign-in while preserving history?'; if(!window.confirm(question))return; const r=await fetch(`/api/admin/students/${selectedStudent.value.id}/archive`,{method:'PATCH',credentials:'same-origin',headers:csrfHeaders(),body:JSON.stringify({is_active:active})}),b=await r.json(); if(!r.ok){detailError.value=b.message||'Account status could not be changed.';return} selectedStudent.value.is_active=b.is_active; await loadStudents(students.value?.current_page||1); }
+async function deleteStudent() { if(!selectedStudent.value || !window.confirm('Permanently delete this student account? Any existing progress, enrollment, realization, Zoom, or attendance history blocks deletion.'))return; const r=await fetch(`/api/admin/students/${selectedStudent.value.id}`,{method:'DELETE',credentials:'same-origin',headers:csrfHeaders()}),b=await r.json(); if(!r.ok){detailError.value=b.message||'Student account could not be deleted.';return} selectedStudent.value=null; await loadStudents(students.value?.current_page||1); }
 
 async function updateStudentPassword(event: Event) {
   if (!selectedStudent.value || updatingPassword.value) return;
@@ -159,12 +146,13 @@ async function resetStudentPassword() {
 async function saveTargets() {
   savingTargets.value = true; targetNotice.value = ''; targetError.value = '';
   try {
-    const response = await fetch('/api/admin/pace-groups', { method: 'PUT', credentials: 'same-origin', headers: csrfHeaders(), body: JSON.stringify({ groups: paceGroups.value.map(group => ({ code: group.value, weekly_target: targetDrafts.value[group.value] })) }) });
+    const response = await fetch('/api/admin/pace-groups', { method: 'PUT', credentials: 'same-origin', headers: csrfHeaders(), body: JSON.stringify({ measurement_period: measurementPeriod.value, groups: paceGroups.value.map(group => ({ code: group.value, minimum_completed_lessons: targetDrafts.value[group.value] })) }) });
     const body = await response.json();
     if (!response.ok) throw new Error(body.message || Object.values(body.errors || {}).flat()[0] as string || 'Weekly targets could not be saved.');
     paceGroups.value = body.pace_groups;
-    targetDrafts.value = Object.fromEntries(paceGroups.value.map(group => [group.value, group.weekly_target]));
-    targetNotice.value = 'Weekly lesson targets saved.';
+    targetDrafts.value = Object.fromEntries(paceGroups.value.map(group => [group.value, group.minimum_completed_lessons]));
+    measurementPeriod.value = paceGroups.value[0]?.measurement_period ?? measurementPeriod.value;
+    targetNotice.value = 'Automatic grouping settings saved.';
   } catch (caught) { targetError.value = (caught as Error).message; }
   finally { savingTargets.value = false; }
 }
@@ -184,12 +172,12 @@ onMounted(() => {void loadStudents();void loadEnrollmentSettings()});
 <template>
   <div class="admin-students-page">
     <details class="pace-target-panel settings-collapse"><summary><span><b>ENROLLMENT FORM SETTINGS</b><strong>Lesson completion requirement</strong><small>Choose whether the form is locked until a student completes a lesson.</small></span><span class="collapse-action">Expand / collapse</span></summary><div class="settings-content"><p>Enable the requirement, choose a category, then set its published lesson number. Use 0 to make the form available immediately.</p><div class="enrollment-settings"><label class="setting-check"><input v-model="enrollmentSetting.enabled" type="checkbox"> Require lesson completion</label><label>Category<select v-model.number="enrollmentSetting.category_id"><option :value="null">Select category</option><option v-for="category in categories.filter(c=>!c.deleted_at)" :key="category.id" :value="category.id">{{ category.name }}</option></select></label><label>Lesson number<input v-model.number="enrollmentSetting.lesson_number" type="number" min="0" max="10000"></label><button class="primary" @click="saveEnrollmentSettings">Save requirement</button></div><p v-if="settingError" class="student-error" role="alert">{{ settingError }}</p><p v-if="settingNotice" class="student-success" role="status">{{ settingNotice }}</p></div></details>
-    <details class="pace-target-panel settings-collapse"><summary><span><b>PACE SETTINGS</b><strong>Weekly lesson targets</strong><small>Set the expected number of lessons per week for each pace group.</small></span><span class="collapse-action">Expand / collapse</span></summary><div class="settings-content"><p>Enter each group’s weekly lesson goal. Save to apply the targets to student progress summaries.</p><div class="pace-target-grid"><label v-for="group in paceGroups" :key="group.value">{{ group.label }}<span><input v-model.number="targetDrafts[group.value]" type="number" min="0" max="1000" :aria-label="`${group.label} weekly lesson target`"><small>lessons / week</small></span></label><button class="primary" :disabled="savingTargets" @click="saveTargets">{{ savingTargets ? 'Saving…' : 'Save targets' }}</button></div><p v-if="targetError" class="student-error" role="alert">{{ targetError }}</p><p v-if="targetNotice" class="student-success" role="status">{{ targetNotice }}</p></div></details>
+    <details class="pace-target-panel settings-collapse"><summary><span><b>PACE SETTINGS</b><strong>Automatic A/B/C/D grouping</strong><small>Assign groups from completed lessons in the selected calendar period.</small></span><span class="collapse-action">Expand / collapse</span></summary><div class="settings-content"><label class="pace-period-setting">Measurement period<select v-model="measurementPeriod"><option value="weekly">Weekly · Monday through Sunday</option><option value="monthly">Monthly · calendar month</option></select></label><p>Enter the minimum number of completed lessons required for each group. Leave a target blank to disable that group. Targets must descend from A to D.</p><div class="pace-target-grid"><label v-for="group in paceGroups" :key="group.value">{{ group.label }}<span><input v-model.number="targetDrafts[group.value]" type="number" min="1" max="1000" :aria-label="`${group.label} minimum completed lessons`" placeholder="Not configured"><small>at least {{ targetDrafts[group.value] || '—' }} completed lessons / {{ measurementPeriod === 'monthly' ? 'month' : 'week' }}</small></span></label><button class="primary" :disabled="savingTargets" @click="saveTargets">{{ savingTargets ? 'Saving…' : 'Save grouping settings' }}</button></div><p v-if="targetError" class="student-error" role="alert">{{ targetError }}</p><p v-if="targetNotice" class="student-success" role="status">{{ targetNotice }}</p></div></details>
     <section class="student-list-panel">
       <div class="students-toolbar">
         <label class="student-search"><Search :size="17" /><input v-model="search" type="search" placeholder="Search name, email, or pseudocode" aria-label="Search students" @input="scheduleSearch"></label>
         <label class="student-filter">Category<select v-model="categoryId" @change="loadStudents(1)"><option value="">All categories</option><option v-for="category in categories" :key="category.id" :value="String(category.id)">{{ category.name }}{{ category.deleted_at ? ' (archived)' : category.is_active ? '' : ' (unavailable)' }}</option></select></label>
-        <label class="student-filter">Pace group<select v-model="paceGroup" @change="loadStudents(1)"><option value="">All pace groups</option><option v-for="option in paceGroups" :key="option.value" :value="option.value">{{ option.label }}</option></select></label>
+        <label class="student-filter">Pace group<select v-model="paceGroup" @change="loadStudents(1)"><option value="">All pace groups</option><option v-for="option in paceGroups" :key="option.value" :value="option.value">{{ option.label }}</option><option value="not_grouped">Not Yet Grouped</option></select></label>
       </div>
       <div class="bulk-toolbar"><label><input type="checkbox" :checked="allSelected" @change="toggleAll"> Select all on this page</label><span>{{ selectedIds.length }} selected</span><button class="secondary-button" :disabled="!selectedIds.length" @click="exportSelected('export')">Export to Excel</button><button class="secondary-button" :disabled="!selectedIds.length" @click="exportSelected('print')">Print forms / Save PDF</button></div>
       <p v-if="error" class="student-error" role="alert">{{ error }}</p>
@@ -205,7 +193,7 @@ onMounted(() => {void loadStudents();void loadEnrollmentSettings()});
               <td><span class="student-pseudocode">{{ student.pseudocode }}</span></td>
               <td>{{ student.current_category?.name ?? 'Not started' }}<small v-if="student.current_category?.is_archived">Archived category</small><small v-else-if="student.current_category && !student.current_category.is_active">Unavailable category</small></td>
               <td><span>{{ student.progress.completed_lessons }} / {{ student.progress.total_lessons }} lessons</span><div class="student-progress-track"><span :style="{ width: `${student.progress.percentage}%` }"></span></div></td>
-              <td>{{ paceLabel(student.pace_group) }}<small>{{ student.weekly_target }} lessons / week</small></td>
+              <td>{{ paceLabel(student.pace_group) }}<small>{{ student.pace_completed_count }} completed {{ periodLabel(student.measurement_period) }}</small></td>
               <td>{{ formatDate(student.registered_at) }}</td>
               <td><button class="student-view-button" @click="viewEnrollment(student.id)">{{ (student.enrollment_status||'not_started').replace('_',' ') }}</button><small>{{ formatDate(student.enrollment_submitted_at||null) }}</small></td>
               <td><span class="student-status" :class="student.is_active ? 'active' : 'inactive'">{{ student.is_active ? 'Active' : 'Inactive' }}</span></td>
@@ -224,9 +212,9 @@ onMounted(() => {void loadStudents();void loadEnrollmentSettings()});
       <p v-if="detailLoading" class="student-table-message">Loading student history…</p>
       <p v-if="detailError" class="student-error" role="alert">{{ detailError }}</p>
       <template v-if="selectedStudent">
-        <div class="student-detail-grid">
-          <article class="student-info-card"><h3><UserRound :size="17" /> Personal information</h3><dl><div><dt>Real name</dt><dd>{{ selectedStudent.personal_information.real_name }}</dd></div><div><dt>Email</dt><dd>{{ selectedStudent.personal_information.email }}</dd></div><div><dt>Country</dt><dd>{{ selectedStudent.personal_information.country || '—' }}</dd></div><div><dt>Complete address</dt><dd>{{ selectedStudent.personal_information.address || '—' }}</dd></div><div><dt>Phone</dt><dd>{{ selectedStudent.personal_information.phone_country_code || '' }} {{ selectedStudent.personal_information.phone_number || '—' }}</dd></div><div><dt>Pseudocode</dt><dd><span class="student-pseudocode">{{ selectedStudent.pseudocode }}</span><small>Permanent identifier · student editing is not available</small></dd></div><div><dt>Registration date</dt><dd>{{ formatDate(selectedStudent.registered_at) }}</dd></div><div><dt>Account status</dt><dd><span class="student-status" :class="selectedStudent.is_active ? 'active' : 'inactive'">{{ selectedStudent.is_active ? 'Active' : 'Inactive' }}</span></dd></div></dl></article>
-          <article class="student-info-card"><h3><Clock3 :size="17" /> Learning assignment</h3><dl><div><dt>Current category</dt><dd>{{ selectedStudent.current_category?.name ?? 'Not started' }}<small v-if="selectedStudent.current_category">{{ selectedStudent.current_category.completed_lessons }} of {{ selectedStudent.current_category.total_lessons }} lessons · {{ selectedStudent.current_category.progress_percentage }}%</small></dd></div><div><dt>Pace group</dt><dd><div class="pace-editor"><select v-model="selectedStudent.pace_group" aria-label="Student pace group"><option v-for="option in paceGroups" :key="option.value" :value="option.value">{{ option.label }} · {{ option.weekly_target }}/week</option></select><button class="primary" :disabled="savingPace" @click="savePaceGroup">{{ savingPace ? 'Saving…' : 'Save pace' }}</button></div><small>{{ selectedStudent.weekly_target }} lessons / week</small><small v-if="paceNotice" class="student-success" role="status">{{ paceNotice }}</small></dd></div></dl></article>
+        <div class="student-profile-actions"><button class="secondary-button" @click="editingProfile=!editingProfile">{{editingProfile?"Cancel edit":"Edit student information"}}</button><button class="secondary-button" @click="setArchived(!selectedStudent.is_active)">{{selectedStudent.is_active?"Archive account":"Restore account"}}</button><button class="category-action remove" @click="deleteStudent">Delete account</button></div><form v-if="editingProfile" class="student-profile-edit" @submit.prevent="saveProfile"><label>Name<input v-model="profileDraft.real_name" maxlength="120" required></label><label>Email<input v-model="profileDraft.email" type="email" maxlength="255" required></label><label>Country<input v-model="profileDraft.country" maxlength="100"></label><label>Address<input v-model="profileDraft.address" maxlength="500"></label><label>Phone country code<input v-model="profileDraft.phone_country_code"></label><label>Phone number<input v-model="profileDraft.phone_number"></label><label>Who invited you?<input v-model="profileDraft.who_invited" maxlength="191"></label><button class="primary" :disabled="savingProfile">{{savingProfile?"Saving…":"Save student information"}}</button></form><div class="student-detail-grid">
+          <article class="student-info-card"><h3><UserRound :size="17" /> Personal information</h3><dl><div><dt>Real name</dt><dd>{{ selectedStudent.personal_information.real_name }}</dd></div><div><dt>Email</dt><dd>{{ selectedStudent.personal_information.email }}</dd></div><div><dt>Country</dt><dd>{{ selectedStudent.personal_information.country || '—' }}</dd></div><div><dt>Complete address</dt><dd>{{ selectedStudent.personal_information.address || '—' }}</dd></div><div><dt>Phone</dt><dd>{{ selectedStudent.personal_information.phone_country_code || '' }} {{ selectedStudent.personal_information.phone_number || '—' }}</dd></div><div><dt>Pseudocode</dt><dd><span class="student-pseudocode">{{ selectedStudent.pseudocode }}</span><small>Permanent identifier · student editing is not available</small></dd></div><div><dt>Registration date</dt><dd>{{ formatDate(selectedStudent.registered_at) }}</dd><dt>Who invited you?</dt><dd>{{ selectedStudent.who_invited || "—" }}</dd></div><div><dt>Account status</dt><dd><span class="student-status" :class="selectedStudent.is_active ? 'active' : 'inactive'">{{ selectedStudent.is_active ? 'Active' : 'Inactive' }}</span></dd></div></dl></article>
+          <article class="student-info-card"><h3><Clock3 :size="17" /> Learning assignment</h3><dl><div><dt>Current category</dt><dd>{{ selectedStudent.current_category?.name ?? 'Not started' }}<small v-if="selectedStudent.current_category">{{ selectedStudent.current_category.completed_lessons }} of {{ selectedStudent.current_category.total_lessons }} lessons · {{ selectedStudent.current_category.progress_percentage }}%</small></dd></div><div><dt>Automatic pace group</dt><dd><strong>{{ paceLabel(selectedStudent.pace_group) }}</strong><small>{{ selectedStudent.pace_completed_count }} completed {{ periodLabel(selectedStudent.measurement_period) }}</small></dd></div></dl></article>
         </div>
         <section class="student-info-card student-password-section" aria-labelledby="student-password-title">
           <h3 id="student-password-title">Password management</h3>

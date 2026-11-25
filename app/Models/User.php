@@ -11,7 +11,7 @@ use LogicException;
 class User extends Authenticatable
 {
     use HasFactory, Notifiable;
-    protected $fillable = ['name', 'email', 'password', 'role', 'pace_group', 'is_active', 'country', 'address', 'phone_country_code', 'phone_number'];
+    protected $fillable = ['name', 'email', 'password', 'role', 'pace_group', 'is_active', 'country', 'address', 'phone_country_code', 'phone_number', 'who_invited'];
     protected $hidden = ['password', 'remember_token', 'pseudocode', 'pace_group', 'is_active'];
     protected function casts(): array { return ['email_verified_at' => 'datetime', 'password' => 'hashed', 'is_active' => 'boolean']; }
     public function lessonProgress() { return $this->hasMany(StudentLessonProgress::class, 'student_id'); }

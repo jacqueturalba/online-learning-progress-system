@@ -13,7 +13,7 @@ class AuthController extends Controller
 {
     public function register(Request $request)
     {
-        $data = $request->validate(['name' => ['required', 'string', 'max:120'], 'email' => ['required', 'email', 'max:255', 'unique:users'], 'password' => ['required', 'confirmed', PasswordRule::defaults()], 'country'=>['required','string','max:100'], 'address'=>['required','string','max:500'], 'phone_country_code'=>['required','regex:/^\+[1-9][0-9]{0,3}$/'], 'phone_number'=>['required','regex:/^[0-9 ()-]{4,24}$/']]);
+        $data = $request->validate(['name' => ['required', 'string', 'max:120'], 'email' => ['required', 'email', 'max:255', 'unique:users'], 'password' => ['required', 'confirmed', PasswordRule::defaults()], 'country'=>['required','string','max:100'], 'address'=>['required','string','max:500'], 'phone_country_code'=>['required','regex:/^\+[1-9][0-9]{0,3}$/'], 'phone_number'=>['required','regex:/^[0-9 ()-]{4,24}$/'], 'who_invited'=>['required','string','max:191']]);
         $user = User::create([...$data, 'role' => 'student']);
         Auth::login($user);
         $request->session()->regenerate();
@@ -23,6 +23,10 @@ class AuthController extends Controller
     public function login(Request $request)
     {
         $data = $request->validate(['email' => ['required', 'email'], 'password' => ['required', 'string']]);
+        $candidate = User::query()->where('email', $data['email'])->first();
+        if ($candidate?->role === 'student' && ! $candidate->is_active) {
+            return response()->json(['message' => 'The provided credentials are incorrect.'], 422);
+        }
         if (!Auth::attempt($data, $request->boolean('remember'))) {
             return response()->json(['message' => 'The provided credentials are incorrect.'], 422);
         }

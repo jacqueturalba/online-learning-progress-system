@@ -68,6 +68,31 @@ class AiOperationService
             ]);
     }
 
+    /** Queue cue preserving Filipino translation from an exact approved English SRT version. */
+    public function queueSubtitleCueTranslation(array $cues, array $source, string $idempotencyKey, int $lessonId): array
+    {
+        $assigned = $this->assigned('translation');
+        $language = $assigned['integration']->target_language;
+        $input = [
+            'cue_translation' => true, 'cues' => $cues, 'target_language' => $language,
+            'source_transcript_operation_id' => $source['transcript_operation_id'],
+            'source_transcript_sha256' => $source['transcript_sha256'],
+            'source_alignment_operation_id' => $source['alignment_operation_id'],
+            'source_english_srt_version_id' => $source['english_srt_version_id'],
+            'source_english_srt_sha256' => $source['english_srt_sha256'],
+        ];
+        return $this->enqueue($assigned, 'translation', $lessonId, $input, $idempotencyKey,
+            $this->fingerprint(['service' => 'translation-cues', 'lesson_id' => $lessonId, 'cues' => $cues, 'source' => $source, 'target_language' => $language]),
+            ['result' => [
+                'target_language' => $language,
+                'source_transcript_operation_id' => $source['transcript_operation_id'],
+                'source_transcript_sha256' => $source['transcript_sha256'],
+                'source_alignment_operation_id' => $source['alignment_operation_id'],
+                'source_english_srt_version_id' => $source['english_srt_version_id'],
+                'source_english_srt_sha256' => $source['english_srt_sha256'],
+            ]]);
+    }
+
     public function queueTranscription(string $audioPath, string $idempotencyKey, ?int $lessonId = null, string $language = 'en', float $timelineOffsetSeconds = 0, ?string $queueName = 'ai-transcription-test'): array
     {
         $assigned = $this->assigned('transcription');
@@ -106,9 +131,32 @@ class AiOperationService
             ? fn (array $configuration, array $credentials, string $model): array => $provider->transcribe($configuration, [
                 'credentials' => $credentials, 'model' => $model, 'audio_path' => $payload['audio_path'], 'language' => $payload['language'] ?? 'en', 'idempotency_key' => $usage->idempotency_key,
             ])
-            : fn (array $configuration, array $credentials, string $model): array => $provider->translate($configuration, [
-                'credentials' => $credentials, 'model' => $model, 'text' => $payload['text'], 'target_language' => $targetLanguage, 'idempotency_key' => $usage->idempotency_key,
-            ]);
+            : (($payload['cue_translation'] ?? false) === true
+                ? function (array $configuration, array $credentials, string $model) use ($provider, $payload, $usage): array {
+                    if (!$provider instanceof \App\Support\SubtitleCueTranslationProvider) throw new RuntimeException('The assigned provider does not support cue preserving subtitle translation.');
+                    $translated = app(SubtitleCueTranslationService::class)->translate($payload['cues'], $configuration, $credentials, $model,
+                        (string) $payload['target_language'], $usage->idempotency_key, $provider);
+                    $parser = app(SubtitleSrtCueService::class);
+                    $translatedCues = $parser->withTranslatedText($payload['cues'], $translated['cues']);
+                    $srt = $parser->render($translatedCues);
+                    $path = 'subtitle-drafts/'.$usage->lesson_id.'/'.$usage->id.'/filipino.srt';
+                    if (!\Illuminate\Support\Facades\Storage::disk('local')->put($path, $srt)) throw new RuntimeException('The private Filipino SRT draft could not be saved.');
+                    return [
+                        'text' => implode("\n", array_column($translatedCues, 'text')),
+                        'translated_cues' => $translatedCues,
+                        'subtitle_draft' => ['text' => implode("\n", array_column($translatedCues, 'text')), 'cues' => $translatedCues,
+                            'srt_path' => $path, 'srt_sha256' => hash('sha256', $srt)],
+                        'source_alignment_operation_id' => $payload['source_alignment_operation_id'],
+                        'source_english_srt_version_id' => $payload['source_english_srt_version_id'],
+                        'source_english_srt_sha256' => $payload['source_english_srt_sha256'],
+                        'source_transcript_operation_id' => $payload['source_transcript_operation_id'],
+                        'source_transcript_sha256' => $payload['source_transcript_sha256'],
+                        'target_language' => $payload['target_language'], 'usage' => $translated['usage'],
+                    ];
+                }
+                : fn (array $configuration, array $credentials, string $model): array => $provider->translate($configuration, [
+                    'credentials' => $credentials, 'model' => $model, 'text' => $payload['text'], 'target_language' => $targetLanguage, 'idempotency_key' => $usage->idempotency_key,
+                ]));
 
         $result = $this->perform($usage, $account, $usage->model, $provider, $targetLanguage, $operation);
         if ($usage->service === 'transcription' && is_string($payload['prepared_audio_path'] ?? null)) {

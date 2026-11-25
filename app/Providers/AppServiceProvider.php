@@ -10,8 +10,12 @@ use App\Support\AiServiceAssignmentPolicy;
 use App\Models\AiIntegration;
 use App\Models\AiServiceAssignment;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Event;
+use Illuminate\Console\Events\CommandStarting;
+use Illuminate\Console\Events\CommandFinished;
 use App\Services\WhisperxProcessRunner;
 use App\Services\SymfonyWhisperxProcessRunner;
+use App\Console\PreventDestructiveDatabaseCommands;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -28,5 +32,8 @@ class AppServiceProvider extends ServiceProvider
     {
         Gate::policy(AiIntegration::class, AiIntegrationPolicy::class);
         Gate::policy(AiServiceAssignment::class, AiServiceAssignmentPolicy::class);
+        $databaseCommandGuard = app(PreventDestructiveDatabaseCommands::class);
+        Event::listen(CommandStarting::class, [$databaseCommandGuard, 'handle']);
+        Event::listen(CommandFinished::class, [$databaseCommandGuard, 'handleFinished']);
     }
 }

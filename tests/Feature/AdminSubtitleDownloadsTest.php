@@ -47,11 +47,26 @@ it('keeps English and Filipino SRT versions private, immutable, and admin-only',
     ]);
 
     $this->actingAs($admin)->getJson('/api/admin/lessons/'.$lesson->id.'/subtitles')->assertOk()->assertJsonCount(0, 'subtitles');
-    $englishApproval = $this->postJson('/api/admin/lessons/'.$lesson->id.'/subtitles/'.$english->id.'/en/approve')->assertCreated();
+    $conflictingApproval = $this->withHeader('Accept', 'application/json')->post('/api/admin/lessons/'.$lesson->id.'/subtitles/'.$english->id.'/en/approve', [
+        'srt_file' => UploadedFile::fake()->createWithContent('conflicting.srt', $englishSrt),
+        'srt_text' => $englishSrt,
+    ]);
+    $conflictingApproval->assertUnprocessable()->assertJsonValidationErrors('srt_text');
+
+    $invalidInlineText = $this->postJson('/api/admin/lessons/'.$lesson->id.'/subtitles/'.$english->id.'/en/approve', [
+        'srt_text' => ['not', 'a', 'string'],
+    ]);
+    $invalidInlineText->assertUnprocessable()->assertJsonValidationErrors('srt_text');
+
+    $englishApproval = $this->postJson('/api/admin/lessons/'.$lesson->id.'/subtitles/'.$english->id.'/en/approve', [
+        'srt_text' => $englishSrt,
+    ])->assertCreated();
     $englishVersion = $englishApproval->json('version_id');
     $englishUrl = $englishApproval->json('download_url');
     $this->get($englishUrl)->assertOk()->assertHeader('Content-Type', 'application/x-subrip; charset=UTF-8')->assertSee('Hello there.');
-    $duplicateEnglish = $this->postJson('/api/admin/lessons/'.$lesson->id.'/subtitles/'.$english->id.'/en/approve')->assertCreated();
+    $duplicateEnglish = $this->postJson('/api/admin/lessons/'.$lesson->id.'/subtitles/'.$english->id.'/en/approve', [
+        'srt_text' => $englishSrt,
+    ])->assertCreated();
     expect($duplicateEnglish->json('version_id'))->toBe($englishVersion);
 
     $filipino = AiOperationUsage::query()->create([
@@ -95,6 +110,40 @@ it('requires a timed Filipino SRT and does not expose drafts for download', func
         'srt_file' => UploadedFile::fake()->createWithContent('spanish.srt', "1\n00:00:00,000 --> 00:00:01,000\nHola.\n"),
     ])->assertUnprocessable();
     $this->get('/api/admin/lessons/'.$lesson->id.'/subtitles/fil/'.$translation->id.'/not-a-version/download')->assertNotFound();
+});
+
+it('saves English subtitle edits privately without changing alignment timing or approving them', function () {
+    Storage::fake('local');
+    $lesson = subtitleDownloadLesson();
+    $admin = subtitleDownloadUser('admin');
+    $student = subtitleDownloadUser('student');
+    $source = "1\n00:00:01,000 --> 00:00:02,000\nOriginal first cue.\n\n2\n00:04:59,000 --> 00:05:02,000\nOriginal second cue.\n";
+    $sourcePath = 'whisperx-alignments/'.$lesson->id.'/93/aligned.srt';
+    Storage::disk('local')->put($sourcePath, $source);
+    $alignment = AiOperationUsage::query()->create([
+        'service' => 'whisperx_alignment', 'model' => 'whisperx-3.8.6', 'lesson_id' => $lesson->id,
+        'status' => 'succeeded', 'idempotency_key' => 'subtitle-editor-'.str()->uuid(),
+        'request_fingerprint' => hash('sha256', 'editor fixture'), 'result' => ['outputs' => ['srt' => $sourcePath]],
+    ]);
+    $edited = "1\n00:00:01,000 --> 00:00:02,000\nA reviewed English sentence that remains intact.\n\n2\n00:04:59,000 --> 00:05:02,000\nA reviewed second cue.\n";
+
+    $this->actingAs($admin)->putJson('/api/admin/lessons/'.$lesson->id.'/whisperx-alignments/'.$alignment->id.'/draft', ['srt_text' => $edited])
+        ->assertOk();
+    $this->getJson('/api/admin/whisperx-alignments/'.$alignment->id.'/preview')
+        ->assertOk()->assertJsonPath('is_draft', true);
+    expect($alignment->fresh()->result['approval_statuses']['en'] ?? null)->toBeNull()
+        ->and(Storage::disk('local')->get($sourcePath))->toBe($source)
+        ->and(Storage::disk('local')->get("subtitle-drafts/{$lesson->id}/{$alignment->id}/en/reviewed.srt"))->toBe(rtrim($edited, "\n"));
+
+    $changedTiming = str_replace('00:00:02,000', '00:00:03,000', $edited);
+    $this->putJson('/api/admin/lessons/'.$lesson->id.'/whisperx-alignments/'.$alignment->id.'/draft', ['srt_text' => $changedTiming])
+        ->assertUnprocessable()->assertJsonValidationErrors('srt_text');
+    $this->actingAs($student)->putJson('/api/admin/lessons/'.$lesson->id.'/whisperx-alignments/'.$alignment->id.'/draft', ['srt_text' => $edited])
+        ->assertForbidden();
+    $this->actingAs($admin)->getJson('/api/admin/whisperx-alignments/'.$alignment->id.'/preview')
+        ->assertOk()->assertJsonPath('srt_text', rtrim($edited, "\n"));
+    $approved = $this->postJson('/api/admin/lessons/'.$lesson->id.'/subtitles/'.$alignment->id.'/en/approve')->assertCreated();
+    $this->get($approved->json('download_url'))->assertOk()->assertSee('A reviewed English sentence that remains intact.')->assertDontSee('Original first cue.');
 });
 
 it('resolves an older approved transcript to its exact prepared chunk by stored request fingerprint', function () {

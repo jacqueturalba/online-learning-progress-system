@@ -4,11 +4,12 @@ namespace App\Services;
 
 use App\Support\AiProvider;
 use App\Support\AiProviderException;
+use App\Support\SubtitleCueTranslationProvider;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
 
-class OpenAiProvider implements AiProvider
+class OpenAiProvider implements AiProvider, SubtitleCueTranslationProvider
 {
     private const MODELS = [
         'transcription' => ['gpt-transcribe', 'gpt-4o-mini-transcribe', 'gpt-4o-transcribe', 'whisper-1'],
@@ -91,6 +92,26 @@ class OpenAiProvider implements AiProvider
             'text' => (string) ($body['choices'][0]['message']['content'] ?? ''),
             'usage' => $this->usage($body), 'request_reference' => $response->header('x-request-id'),
         ];
+    }
+
+    public function translateSubtitleCues(array $configuration, array $input): array
+    {
+        $response = $this->request($input['credentials'])->withHeaders($this->idempotencyHeaders($input['idempotency_key'] ?? null))->post($this->url($configuration, '/chat/completions'), [
+            'model' => $input['model'],
+            'response_format' => ['type' => 'json_object'],
+            'messages' => [
+                ['role' => 'system', 'content' => 'Translate each supplied subtitle cue faithfully into natural Filipino. Preserve meaning, names, Bible book names, references, numbers, punctuation intent, and theological terms. Use adjacent context only to resolve references and terminology. Do not add or omit meaning. Keep every cue ID exactly once and in the same order. Do not split, merge, renumber, or reorder cues. Keep each translation concise enough for its original subtitle timing. Return only JSON with shape {"cues":[{"index":1,"text":"..."}]} .'],
+                ['role' => 'user', 'content' => json_encode(['context_before' => $input['context_before'] ?? [], 'cues' => $input['cues'] ?? [], 'context_after' => $input['context_after'] ?? []], JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE)],
+            ],
+        ]);
+        $this->assertSuccessful($response);
+        $body = $response->json();
+        $content = $body['choices'][0]['message']['content'] ?? null;
+        if (!is_string($content)) throw new RuntimeException('The translation provider returned no Filipino cue data.');
+        try { $translated = json_decode($content, true, flags: JSON_THROW_ON_ERROR); }
+        catch (\JsonException) { throw new RuntimeException('The translation provider returned malformed Filipino cue data.'); }
+        if (!is_array($translated['cues'] ?? null)) throw new RuntimeException('The translation provider returned no Filipino cue list.');
+        return ['cues' => $translated['cues'], 'usage' => $this->usage($body), 'request_reference' => $response->header('x-request-id')];
     }
 
     private function request(array $credentials)

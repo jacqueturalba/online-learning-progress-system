@@ -10,6 +10,7 @@ use App\Models\StudentLessonProgress;
 use App\Models\User;
 use App\Models\StudentZoomAssignment;
 use App\Models\ZoomBatchMembership;
+use App\Services\StudentPaceGroupAssigner;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -18,12 +19,13 @@ use Illuminate\Validation\Rules\Password as PasswordRule;
 
 class AdminStudentController extends Controller
 {
-    public function index(Request $request)
+    public function index(Request $request, StudentPaceGroupAssigner $assigner)
     {
+        $assigner->recalculateAll();
         $filters = $request->validate([
             'search' => ['nullable', 'string', 'max:120'],
             'category_id' => ['nullable', 'integer', 'exists:categories,id'],
-            'pace_group' => ['nullable', Rule::exists('pace_groups', 'code')],
+            'pace_group' => ['nullable', Rule::in(['A', 'B', 'C', 'D', 'not_grouped'])],
             'page' => ['nullable', 'integer', 'min:1'],
         ]);
 
@@ -42,11 +44,13 @@ class AdminStudentController extends Controller
         }
 
         if (isset($filters['pace_group'])) {
-                $query->where('pace_group', $filters['pace_group']);
+            if ($filters['pace_group'] === 'not_grouped') $query->whereNull('pace_group');
+            else $query->where('pace_group', $filters['pace_group']);
         }
 
         $students = $query->orderByDesc('created_at')->orderByDesc('id')->paginate(25)->withQueryString();
         $studentIds = $students->getCollection()->modelKeys();
+        $paceSummaries = $assigner->summariesFor($studentIds);
         $currentCategoryIds = $students->getCollection()->map(fn (User $student) => $student->categoryProgress->first()?->category_id)
             ->filter()->unique()->values();
         $lessonTotals = $currentCategoryIds->isEmpty() ? collect() : Lesson::query()->whereIn('category_id', $currentCategoryIds)
@@ -61,7 +65,7 @@ class AdminStudentController extends Controller
             ->groupBy('progress.student_id', 'lessons.category_id')
             ->get()->keyBy(fn ($row) => $row->student_id.':'.$row->category_id);
 
-        $students->getCollection()->transform(function (User $student) use ($lessonTotals, $completedCounts): array {
+        $students->getCollection()->transform(function (User $student) use ($lessonTotals, $completedCounts, $paceSummaries): array {
             $categoryProgress = $student->categoryProgress->first();
             $category = $categoryProgress?->category;
             $total = (int) ($lessonTotals[$categoryProgress?->category_id] ?? 0);
@@ -71,9 +75,12 @@ class AdminStudentController extends Controller
                 'id' => $student->id,
                 'name' => $student->name,
                 'email' => $student->email,
+                'who_invited' => $student->who_invited,
                 'pseudocode' => $student->pseudocode,
                 'pace_group' => $student->pace_group,
                 'weekly_target' => $student->paceGroup?->weekly_target ?? 0,
+                'pace_completed_count' => $paceSummaries->get($student->id)['completed_count'] ?? 0,
+                'measurement_period' => $paceSummaries->get($student->id)['measurement_period'] ?? 'weekly',
                 'is_active' => $student->is_active,
                 'registered_at' => $student->created_at,
                 'enrollment_status' => $student->enrollmentForms->first()?->status ?? 'not_started',
@@ -90,19 +97,25 @@ class AdminStudentController extends Controller
         ]);
     }
 
-    public function show(User $student)
+    public function show(User $student, StudentPaceGroupAssigner $assigner)
     {
         abort_unless($student->role === 'student', 404);
+        $paceSummary = $assigner->recalculateStudent($student->id);
+        $student->refresh()->load('paceGroup');
 
         $history = StudentCategoryProgress::query()->where('student_id', $student->id)
             ->with(['category' => fn ($category) => $category->with(['lessons' => fn ($lessons) => $lessons->withTrashed()
                 ->where(fn ($query) => $query->where('is_published', true)
                     ->orWhereHas('progress', fn ($progress) => $progress->where('student_id', $student->id)))
-                ->with(['progress' => fn ($progress) => $progress->where('student_id', $student->id)])])])
+                ->with([
+                    'progress' => fn ($progress) => $progress->where('student_id', $student->id),
+                    'realizations' => fn ($realizations) => $realizations->where('student_id', $student->id)->orderByDesc('id'),
+                ])])])
             ->orderByDesc('updated_at')->orderByDesc('id')->get()
             ->map(function (StudentCategoryProgress $progress) use ($student): array {
                 $lessons = $progress->category->lessons->map(function (Lesson $lesson): array {
                     $lessonProgress = $lesson->progress->first();
+                    $realization = $lesson->realizations->first();
                     return [
                         'id' => $lesson->id,
                         'title' => $lesson->title,
@@ -112,6 +125,9 @@ class AdminStudentController extends Controller
                         'last_watched_at' => $lessonProgress?->last_watched_at,
                         'started_at' => $lessonProgress?->started_at,
                         'completed_at' => $lessonProgress?->completed_at,
+                        'realization' => $realization?->realization,
+                        'questions' => $realization?->questions,
+                        'realization_submitted_at' => $realization?->submitted_at,
                     ];
                 });
                 $completed = $lessons->where('is_completed', true)->count();
@@ -147,11 +163,14 @@ class AdminStudentController extends Controller
                 'id' => $student->id,
                 'real_name' => $student->name,
                 'email' => $student->email,
+                'who_invited' => $student->who_invited,
                 'country' => $student->country, 'address' => $student->address, 'phone_country_code' => $student->phone_country_code, 'phone_number' => $student->phone_number,
                 'personal_information' => ['real_name' => $student->name, 'email' => $student->email, 'country'=>$student->country, 'address'=>$student->address, 'phone_country_code'=>$student->phone_country_code, 'phone_number'=>$student->phone_number],
                 'pseudocode' => $student->pseudocode,
                 'pace_group' => $student->pace_group,
                 'weekly_target' => $student->paceGroup?->weekly_target ?? 0,
+                'pace_completed_count' => $paceSummary['completed_count'],
+                'measurement_period' => $paceSummary['measurement_period'],
                 'is_active' => $student->is_active,
                 'registered_at' => $student->created_at,
                 'current_category' => $currentCategory,
@@ -162,14 +181,40 @@ class AdminStudentController extends Controller
         ]);
     }
 
-    public function updatePaceGroup(Request $request, User $student)
+    public function update(Request $request, User $student)
     {
         abort_unless($student->role === 'student', 404);
-
-        $data = $request->validate(['pace_group' => ['required', Rule::exists('pace_groups', 'code')]]);
+        $data = $request->validate([
+            'name' => ['required','string','max:120'], 'email' => ['required','email','max:255', Rule::unique('users','email')->ignore($student->id)],
+            'country' => ['nullable','string','max:100'], 'address' => ['nullable','string','max:500'],
+            'phone_country_code' => ['nullable','regex:/^\\+[1-9][0-9]{0,3}$/'], 'phone_number' => ['nullable','regex:/^[0-9 ()-]{4,24}$/'],
+            'who_invited' => ['nullable','string','max:191'],
+        ]);
         $student->update($data);
+        return response()->json(['student' => ['id'=>$student->id,'real_name'=>$student->name,'email'=>$student->email,'country'=>$student->country,'address'=>$student->address,'phone_country_code'=>$student->phone_country_code,'phone_number'=>$student->phone_number,'who_invited'=>$student->who_invited]]);
+    }
 
-        return response()->json(['pace_group' => $student->pace_group, 'weekly_target' => $student->paceGroup()->value('weekly_target')]);
+    public function archive(Request $request, User $student)
+    {
+        abort_unless($student->role === 'student', 404);
+        $data = $request->validate(['is_active' => ['required','boolean']]);
+        $student->update(['is_active' => $data['is_active']]);
+        return response()->json(['is_active' => $student->is_active]);
+    }
+
+    public function destroy(User $student)
+    {
+        abort_unless($student->role === 'student', 404);
+        $hasHistory = $student->lessonProgress()->exists() || $student->categoryProgress()->exists()
+            || $student->realizations()->exists() || $student->zoomAssignments()->exists()
+            || $student->zoomBatchMemberships()->exists() || $student->zoomAttendanceRecords()->exists()
+            || $student->enrollmentForms()->exists()
+            || DB::table('student_enrollment_settings')->where('student_id', $student->id)->exists()
+            || DB::table('student_category_transfers')->where('student_id', $student->id)->exists()
+            || DB::table('student_milestone_responses')->where('student_id', $student->id)->exists();
+        abort_if($hasHistory, 422, 'This student has learning or Zoom history. Archive the account to preserve its records.');
+        $student->delete();
+        return response()->json(['message' => 'Student account deleted.']);
     }
 
     public function updatePassword(Request $request, User $student)

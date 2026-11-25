@@ -180,10 +180,10 @@ test('student stays on a completed lesson until its realization unlocks Next Les
   await expect(page.locator('.lesson-navigation-notice')).toContainText('Lesson complete. Submit your realization above to unlock the next lesson.');
   await expect(page.getByRole('button', { name: 'Next Lesson' })).toBeDisabled();
 
-  await page.getByLabel('What did you take away from this lesson?').fill('I learned this lesson.');
+  await page.getByLabel('What is your take away from this lesson?').fill('I learned this lesson.');
   await page.getByRole('button', { name: 'Save realization' }).click();
   await expect(page.getByRole('alert')).toContainText('The given data was invalid.');
-  await expect(page.getByLabel('What did you take away from this lesson?')).toHaveValue('I learned this lesson.');
+  await expect(page.getByLabel('What is your take away from this lesson?')).toHaveValue('I learned this lesson.');
   await page.getByRole('button', { name: 'Save realization' }).evaluate(button => { (button as HTMLButtonElement).click(); (button as HTMLButtonElement).click(); });
   await expect(page.getByRole('button', { name: 'Next Lesson' })).toBeEnabled();
   await expect(page.getByText('Realization saved. The next lesson is ready when you are.')).toBeVisible();

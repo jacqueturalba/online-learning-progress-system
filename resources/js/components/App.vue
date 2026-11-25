@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { BookOpen, ChartNoAxesColumnIncreasing, Check, ChevronRight, CirclePlay, ClipboardCheck, Clock3, FileText, FolderTree, GraduationCap, House, LayoutDashboard, LogOut, Menu, Play, Settings, UserRound, UsersRound, Video, X } from '@lucide/vue';
 import AdminDashboard from './AdminDashboard.vue';
 import AdminStudents from './AdminStudents.vue';
@@ -17,7 +17,9 @@ import PublicLanding from './PublicLanding.vue';
 type User = { id: number; name: string; email: string; role: 'admin' | 'super_admin' | 'student'; country?: string|null; address?: string|null; phone_country_code?: string|null; phone_number?: string|null };
 type Branding = { brand_name: string; brand_description: string; colors: { primary: string; secondary: string; accent: string; background: string; text: string }; logo_url: string | null; hero_image_url?: string; daily_verse_text?: string; daily_verse_reference?: string };
 type LessonProgress = { last_position_seconds: number; watched_seconds: number; progress_percentage: number; is_completed: boolean; last_watched_at: string | null };
-type Lesson = { id: number; title: string; description?: string; thumbnail_url?: string | null; video_stream_url?: string | null; has_video?: boolean; duration_seconds?: number; sort_order: number; is_unlocked: boolean; realization_submitted: boolean; progress: LessonProgress | null };
+type SubtitleTrack = { language: 'en' | 'fil'; label: string; url: string };
+type Lesson = { id: number; title: string; description?: string; thumbnail_url?: string | null; video_stream_url?: string | null; subtitle_tracks?: SubtitleTrack[]; has_video?: boolean; duration_seconds?: number; sort_order: number; is_unlocked: boolean; realization_submitted: boolean; realization_text?: string|null; realization_questions?: string|null; progress: LessonProgress | null };
+type LessonMilestone = { lesson_title: string; message: string; image_url: string | null; scheduled_at: string; response_submitted: boolean; response: string | null; join_url: string | null };
 type Category = { id: number; name: string; description?: string; thumbnail_url?: string | null; background_color?: string | null; total_lessons: number; completed_lessons: number; progress_percentage: number; lessons: Lesson[] };
 type AdminDashboard = {
   total_students: number;
@@ -50,7 +52,24 @@ const defaultBranding: Branding = { brand_name: 'Learnwell', brand_description: 
 const branding = ref<Branding>({ ...defaultBranding, colors: { ...defaultBranding.colors } });
 const studentPage = ref<'home' | 'profile' | 'zoom'>('home');
 const enrollment = ref<{eligible:boolean;requirement_enabled:boolean;category_name:string|null;lesson_number:number;status:string;revision_reason:string|null}>({eligible:false,requirement_enabled:false,category_name:null,lesson_number:0,status:'not_started',revision_reason:null});
-const user = ref<User | null>(null), categories = ref<Category[]>([]), loading = ref(true), error = ref(''), notice = ref(''), playbackError = ref(''), navigationNotice = ref(''), autoplayBlocked = ref(false), replayRequired = ref(false), selected = ref<Lesson | null>(null), navOpen = ref(false), loginMode = ref(location.pathname !== '/register'), resetMode = ref(false), lessonPages = ref<Record<number, number>>({}), realizationText = ref(''), realizationNotice = ref(''), realizationError = ref(''), realizationSaving = ref(false);
+const milestone = ref<LessonMilestone | null>(null), milestoneOpen = ref(false), milestoneDraft = ref(''), milestoneSaving = ref(false), milestoneError = ref('');
+const user = ref<User | null>(null), categories = ref<Category[]>([]), loading = ref(true), error = ref(''), notice = ref(''), playbackError = ref(''), navigationNotice = ref(''), autoplayBlocked = ref(false), replayRequired = ref(false), selected = ref<Lesson | null>(null), navOpen = ref(false), loginMode = ref(location.pathname !== '/register'), resetMode = ref(false), lessonPages = ref<Record<number, number>>({}), realizationText = ref(''), realizationQuestion = ref(''), realizationNotice = ref(''), realizationError = ref(''), realizationSaving = ref(false);
+const lessonVideo = ref<HTMLVideoElement | null>(null);
+const selectedSubtitleLanguage = ref<'off' | 'en' | 'fil'>('off');
+const lastSelectedSubtitleLanguage = ref<'en' | 'fil'>('en');
+function synchronizeSubtitleSelection() {
+  const tracks = Array.from(lessonVideo.value?.textTracks ?? []);
+  const showing = tracks.find(track => track.mode === 'showing' && (track.language === 'en' || track.language === 'fil'));
+  selectedSubtitleLanguage.value = showing?.language === 'en' || showing?.language === 'fil' ? showing.language : 'off';
+  if (showing && (showing.language === 'en' || showing.language === 'fil')) lastSelectedSubtitleLanguage.value = showing.language;
+  for (const track of tracks) {
+    if (track !== showing && track.mode !== 'hidden') track.mode = 'hidden';
+  }
+}
+watch(lessonVideo, (video, previous) => {
+  previous?.textTracks.removeEventListener('change', synchronizeSubtitleSelection);
+  video?.textTracks.addEventListener('change', synchronizeSubtitleSelection);
+});
 const isPublicLanding = computed(() => location.pathname === '/' && !location.search.includes('auth=') && !resetToken.value);
 const adminSection = ref<AdminSection>(getAdminSection());
 const lessonView = ref<'grid' | 'list'>('grid');
@@ -125,7 +144,7 @@ async function load() {
         const response = await api('/api/me');
         user.value = response.user;
 
-        if (user.value?.role === 'student') { const learning = await api('/api/learning'); categories.value = learning.categories; enrollment.value = learning.enrollment; const current = continueLesson.value; if (current) { const category = learning.categories.find((item: Category) => item.lessons.some((lesson: Lesson) => lesson.id === current.id)); if (category) lessonPages.value[category.id] = Math.floor(category.lessons.findIndex((lesson: Lesson) => lesson.id === current.id) / lessonsPerPage); } }
+        if (user.value?.role === 'student') { const learning = await api('/api/learning'); categories.value = learning.categories; enrollment.value = learning.enrollment; milestone.value = learning.milestone; milestoneOpen.value = Boolean(milestone.value && !milestone.value.response_submitted); const current = continueLesson.value; if (current) { const category = learning.categories.find((item: Category) => item.lessons.some((lesson: Lesson) => lesson.id === current.id)); if (category) lessonPages.value[category.id] = Math.floor(category.lessons.findIndex((lesson: Lesson) => lesson.id === current.id) / lessonsPerPage); } }
         else categories.value = [];
         if (user.value && ['admin', 'super_admin'].includes(user.value.role)) {
             if (location.pathname === '/login' || location.pathname === '/register') history.replaceState({}, '', '/admin/dashboard');
@@ -175,8 +194,9 @@ async function watchLesson(lesson: Lesson, autoplay = true) {
   playbackExpiresAt = 0;
   if (priorSession && priorLessonId) void api(`/api/lessons/${priorLessonId}/playback-session/revoke`, { method: 'POST', body: JSON.stringify({ playback_token: priorSession }) }).catch(() => undefined);
   selected.value = { ...lesson, video_stream_url: null };
+  selectedSubtitleLanguage.value = 'off';
   playbackInitializing.value = false;
-  realizationText.value = ''; realizationNotice.value = ''; realizationError.value = '';
+  realizationText.value = lesson.realization_text || ''; realizationQuestion.value = lesson.realization_questions || ''; realizationNotice.value = ''; realizationError.value = '';
   navigationNotice.value = '';
   autoplayOnLoad = autoplay;
   autoplayBlocked.value = false;
@@ -193,13 +213,62 @@ async function watchLesson(lesson: Lesson, autoplay = true) {
     }
     playbackToken = session.playback_token;
     playbackExpiresAt = Date.now() + session.expires_in_seconds * 1000;
-    selected.value = { ...lesson, video_stream_url: session.video_url };
+    selected.value = { ...lesson, video_stream_url: session.video_url, subtitle_tracks: [] };
     schedulePlaybackRenewal(lesson.id);
+    void loadSubtitleTracks(lesson.id);
   } catch (caught) {
     playbackError.value = (caught as Error).message || 'The lesson video could not be authorized.';
   } finally {
     playbackInitializing.value = false;
   }
+}
+async function loadSubtitleTracks(lessonId: number) {
+  try {
+    const response = await api(`/api/lessons/${lessonId}/subtitles`);
+    if (selected.value?.id !== lessonId) return;
+    const tracks = Array.isArray(response.tracks)
+      ? response.tracks.filter((track: SubtitleTrack) => ['en', 'fil'].includes(track.language) && typeof track.url === 'string')
+      : [];
+    selected.value = { ...selected.value, subtitle_tracks: tracks };
+    await nextTick();
+    if (selected.value?.id !== lessonId || !lessonVideo.value) return;
+    for (const element of Array.from(lessonVideo.value.querySelectorAll<HTMLTrackElement>('track[kind="subtitles"]'))) {
+      const textTrack = element.track;
+      if (element.readyState !== HTMLTrackElement.ERROR && textTrack.mode !== 'hidden' && textTrack.mode !== 'showing') textTrack.mode = 'hidden';
+    }
+  } catch {
+    // Subtitle availability must not prevent a student from watching the video.
+  }
+}
+async function changeSubtitleLanguage(event: Event) {
+  const language = (event.target as HTMLSelectElement).value as 'off' | 'en' | 'fil';
+  selectedSubtitleLanguage.value = language;
+  if (language === 'en' || language === 'fil') lastSelectedSubtitleLanguage.value = language;
+  await applySubtitleLanguage();
+}
+async function toggleSubtitleCaptions() {
+  if (selectedSubtitleLanguage.value === 'off') {
+    const available = selected.value?.subtitle_tracks?.map(track => track.language) ?? [];
+    selectedSubtitleLanguage.value = available.includes(lastSelectedSubtitleLanguage.value)
+      ? lastSelectedSubtitleLanguage.value
+      : available[0] ?? 'off';
+    if (selectedSubtitleLanguage.value === 'en' || selectedSubtitleLanguage.value === 'fil') lastSelectedSubtitleLanguage.value = selectedSubtitleLanguage.value;
+  } else {
+    lastSelectedSubtitleLanguage.value = selectedSubtitleLanguage.value;
+    selectedSubtitleLanguage.value = 'off';
+  }
+  await applySubtitleLanguage();
+}
+async function applySubtitleLanguage() {
+  await nextTick();
+  const video = lessonVideo.value;
+  if (!video) return;
+  for (const track of Array.from(video.textTracks)) {
+    track.mode = selectedSubtitleLanguage.value !== 'off' && track.language === selectedSubtitleLanguage.value
+      ? 'showing'
+      : 'hidden';
+  }
+  synchronizeSubtitleSelection();
 }
 function clearPlaybackRenewal() {
   if (playbackRenewalTimer) clearTimeout(playbackRenewalTimer);
@@ -233,23 +302,47 @@ function renewPlaybackWhenReturning() {
   if (selected.value && playbackToken && playbackExpiresAt - Date.now() < 6 * 60_000) void renewPlaybackSession(selected.value.id);
 }
 async function submitRealization() {
-  if (!selected.value || selected.value.realization_submitted || realizationSaving.value) return;
+  if (!selected.value || realizationSaving.value) return;
   realizationSaving.value = true; realizationNotice.value = ''; realizationError.value = '';
   try {
     const lessonId = selected.value.id;
-    await api(`/api/lessons/${lessonId}/realizations`, { method: 'POST', body: JSON.stringify({ realization: realizationText.value }) });
-    realizationText.value = ''; realizationNotice.value = 'Your realization has been saved.';
+    const wasSubmitted = selected.value.realization_submitted;
+    await api(`/api/lessons/${lessonId}/realizations`, { method: wasSubmitted ? 'PUT' : 'POST', body: JSON.stringify({ realization: realizationText.value, questions: realizationQuestion.value }) });
+    realizationNotice.value = wasSubmitted ? 'Your changes have been saved.' : 'Your realization has been saved.';
     await refreshStudentLearning(lessonId);
     navigationNotice.value = nextLesson.value ? 'Realization saved. The next lesson is ready when you are.' : 'Realization saved.';
   } catch (caught) { realizationError.value = (caught as Error).message; }
   finally { realizationSaving.value = false; }
 }
+async function saveRealizationQuestions() {
+  if (!selected.value || !realizationQuestion.value.trim() || realizationSaving.value) return;
+  realizationSaving.value = true; realizationError.value = ''; realizationNotice.value = '';
+  try { await api(`/api/lessons/${selected.value.id}/realization-questions`, { method: 'PUT', body: JSON.stringify({ questions: realizationQuestion.value }) }); realizationNotice.value = 'Your questions have been saved.'; await refreshStudentLearning(selected.value.id); }
+  catch (caught) { realizationError.value = (caught as Error).message; }
+  finally { realizationSaving.value = false; }
+}
+async function submitMilestoneResponse() {
+  if (!milestone.value || milestoneSaving.value) return;
+  milestoneSaving.value = true; milestoneError.value = '';
+  try {
+    await api('/api/lesson-milestone-response', { method: 'POST', body: JSON.stringify({ response: milestoneDraft.value }) });
+    milestone.value = { ...milestone.value, response_submitted: true, response: milestoneDraft.value };
+    milestoneOpen.value = false;
+  } catch (caught) { milestoneError.value = (caught as Error).message; }
+  finally { milestoneSaving.value = false; }
+}
 async function refreshStudentLearning(lessonId = selected.value?.id) {
   const response = await api('/api/learning');
   categories.value = response.categories;
+  milestone.value = response.milestone;
+  if (milestone.value && !milestone.value.response_submitted) milestoneOpen.value = true;
   if (lessonId !== undefined) {
     const refreshed = response.categories.flatMap((category: Category) => category.lessons).find((lesson: Lesson) => lesson.id === lessonId);
-    if (refreshed && selected.value?.id === lessonId) selected.value = { ...refreshed, video_stream_url: selected.value.video_stream_url };
+    if (refreshed && selected.value?.id === lessonId) selected.value = {
+      ...refreshed,
+      video_stream_url: selected.value.video_stream_url,
+      subtitle_tracks: selected.value.subtitle_tracks,
+    };
   }
 }
 function lessonPage(category: Category) { return Math.min(lessonPages.value[category.id] ?? 0, lessonPageCount(category) - 1); }
@@ -345,6 +438,7 @@ async function closeLesson() {
   clearPlaybackRenewal();
   playbackToken = null;
   playbackExpiresAt = 0;
+  selectedSubtitleLanguage.value = 'off';
   selected.value = null;
   if (lessonId && token) void api(`/api/lessons/${lessonId}/playback-session/revoke`, { method: 'POST', body: JSON.stringify({ playback_token: token }) }).catch(() => undefined);
 }
@@ -382,7 +476,7 @@ onMounted(() => {
     <div class="auth-form-wrap">
       <form v-if="resetToken" class="auth-form" @submit.prevent="submitReset"><div class="mobile-brand"><!--<GraduationCap />--><img src="https://biblestudy.zcmc.org.ph/storage/branding/zcmc-logo.svg" alt="Logo" class="w-7 h-7 object-contain" /><span><b>{{ branding.brand_name }}</b><small>{{ branding.brand_description }}</small></span></div><p class="eyebrow">ACCOUNT RECOVERY</p><h2>Choose a new password.</h2><p class="muted">Set a new password to get back to learning.</p><label>Email address<input v-model="resetEmail" name="email" type="email" autocomplete="email" required></label><label>New password<input name="password" type="password" autocomplete="new-password" required minlength="8" placeholder="At least 8 characters"></label><label>Confirm password<input name="password_confirmation" type="password" autocomplete="new-password" required minlength="8" placeholder="Enter it again"></label><p v-if="error" class="error">{{ error }}</p><button class="primary wide">Update password <ChevronRight :size="17" /></button></form>
       <form v-else-if="resetMode" class="auth-form" @submit.prevent="requestReset"><div class="mobile-brand"><!--<GraduationCap />--><img src="https://biblestudy.zcmc.org.ph/storage/branding/zcmc-logo.svg" alt="Logo" class="w-7 h-7 object-contain" /><span><b>{{ branding.brand_name }}</b><small>{{ branding.brand_description }}</small></span></div><p class="eyebrow">ACCOUNT RECOVERY</p><h2>Forgot your password?</h2><p class="muted">We’ll email you a link to choose a new one.</p><label>Email address<input name="email" type="email" autocomplete="email" required placeholder="you@example.com"></label><p v-if="error" class="error">{{ error }}</p><p v-if="notice" class="success">{{ notice }}</p><button class="primary wide">Send reset link <ChevronRight :size="17" /></button><p class="switch"><button type="button" @click="resetMode = false; error = ''; notice = ''">Back to sign in</button></p></form>
-      <form v-else class="auth-form" @submit.prevent="authenticate"><div class="mobile-brand"><!--<GraduationCap />--><img src="https://biblestudy.zcmc.org.ph/storage/branding/zcmc-logo.svg" alt="Logo" class="w-7 h-7 object-contain" /><span><b>{{ branding.brand_name }}</b><small>{{ branding.brand_description }}</small></span></div><p class="eyebrow">{{ loginMode ? 'WELCOME BACK' : 'GET STARTED' }}</p><h2>{{ loginMode ? 'Good to see you.' : 'Create your account.' }}</h2><p class="muted">{{ loginMode ? 'Pick up where you left off.' : 'Your next chapter starts here.' }}</p><p v-if="notice" class="success">{{ notice }}</p><label v-if="!loginMode">Your name<input name="name" autocomplete="name" required placeholder="Your Name"></label><label v-if="!loginMode">Country<input name="country" list="registration-countries" required placeholder="Search or type country"><datalist id="registration-countries"><option>Philippines</option><option>Singapore</option><option>United States</option><option>United Kingdom</option><option>Canada</option><option>Australia</option><option>Malaysia</option><option>Japan</option><option>South Korea</option><option>India</option></datalist></label><label v-if="!loginMode">Complete address<input name="address" autocomplete="street-address" required></label><label v-if="!loginMode">Phone number<div class="phone-input"><select name="phone_country_code" required aria-label="Country calling code"><option value="">Code</option><option value="+63">Philippines +63</option><option value="+65">Singapore +65</option><option value="+1">United States/Canada +1</option><option value="+44">United Kingdom +44</option><option value="+61">Australia +61</option><option value="+60">Malaysia +60</option><option value="+91">India +91</option><option value="+81">Japan +81</option><option value="+82">South Korea +82</option></select><input name="phone_number" inputmode="tel" autocomplete="tel-national" required placeholder="Phone number"></div></label><label>Email address<input name="email" type="email" autocomplete="email" required placeholder="you@example.com"></label><label>Password<input name="password" type="password" :autocomplete="loginMode ? 'current-password' : 'new-password'" required minlength="8" placeholder="At least 8 characters"></label><label v-if="!loginMode">Confirm password<input name="password_confirmation" type="password" autocomplete="new-password" required minlength="8" placeholder="Enter it again"></label><p v-if="error" class="error">{{ error }}</p><button class="primary wide">{{ loginMode ? 'Sign in' : 'Create account' }} <ChevronRight :size="17" /></button><p v-if="loginMode" class="switch"><button type="button" @click="resetMode = true; error = ''">Forgot password?</button></p><p class="switch">{{ loginMode ? 'New to ' + branding.brand_name + '?' : 'Already have an account?' }} <button type="button" @click="loginMode = !loginMode; error = ''">{{ loginMode ? 'Create an account' : 'Sign in' }}</button></p></form>
+      <form v-else class="auth-form" @submit.prevent="authenticate"><div class="mobile-brand"><!--<GraduationCap />--><img src="https://biblestudy.zcmc.org.ph/storage/branding/zcmc-logo.svg" alt="Logo" class="w-7 h-7 object-contain" /><span><b>{{ branding.brand_name }}</b><small>{{ branding.brand_description }}</small></span></div><p class="eyebrow">{{ loginMode ? 'WELCOME BACK' : 'GET STARTED' }}</p><h2>{{ loginMode ? 'Good to see you.' : 'Create your account.' }}</h2><p class="muted">{{ loginMode ? 'Pick up where you left off.' : 'Your next chapter starts here.' }}</p><p v-if="notice" class="success">{{ notice }}</p><label v-if="!loginMode">Your name<input name="name" autocomplete="name" required placeholder="Your Name"></label><label v-if="!loginMode">Country<input name="country" list="registration-countries" required placeholder="Search or type country"><datalist id="registration-countries"><option>Philippines</option><option>Singapore</option><option>United States</option><option>United Kingdom</option><option>Canada</option><option>Australia</option><option>Malaysia</option><option>Japan</option><option>South Korea</option><option>India</option></datalist></label><label v-if="!loginMode">Complete address<input name="address" autocomplete="street-address" required></label><label v-if="!loginMode">Phone number<div class="phone-input"><select name="phone_country_code" required aria-label="Country calling code"><option value="">Code</option><option value="+63">Philippines +63</option><option value="+65">Singapore +65</option><option value="+1">United States/Canada +1</option><option value="+44">United Kingdom +44</option><option value="+61">Australia +61</option><option value="+60">Malaysia +60</option><option value="+91">India +91</option><option value="+81">Japan +81</option><option value="+82">South Korea +82</option></select><input name="phone_number" inputmode="tel" autocomplete="tel-national" required placeholder="Phone number"></div></label><label v-if="!loginMode">Who invited you?<input name="who_invited" maxlength="191" required placeholder="Name, N/A, or where you heard about us"><small>If no one invited you, enter N/A. You may also indicate where you heard about us.</small></label><label>Email address<input name="email" type="email" autocomplete="email" required placeholder="you@example.com"></label><label>Password<input name="password" type="password" :autocomplete="loginMode ? 'current-password' : 'new-password'" required minlength="8" placeholder="At least 8 characters"></label><label v-if="!loginMode">Confirm password<input name="password_confirmation" type="password" autocomplete="new-password" required minlength="8" placeholder="Enter it again"></label><p v-if="error" class="error">{{ error }}</p><button class="primary wide">{{ loginMode ? 'Sign in' : 'Create account' }} <ChevronRight :size="17" /></button><p v-if="loginMode" class="switch"><button type="button" @click="resetMode = true; error = ''">Forgot password?</button></p><p class="switch">{{ loginMode ? 'New to ' + branding.brand_name + '?' : 'Already have an account?' }} <button type="button" @click="loginMode = !loginMode; error = ''">{{ loginMode ? 'Create an account' : 'Sign in' }}</button></p></form>
     </div>
   </section>
   <div v-else class="app-shell">
@@ -459,12 +553,12 @@ onMounted(() => {
             </div>
           <aside class="daily-verse"><span>DAILY VERSE</span><p>“{{ branding.daily_verse_text || 'Your word is a lamp to my feet and a light to my path.' }}”</p><b>{{ branding.daily_verse_reference || 'Psalm 119:105' }}</b></aside>
           </div>
-        <section id="learning" class="learning-section"><div class="section-heading"><div><p class="eyebrow">YOUR LEARNING ROADMAP</p><h2>Learning path</h2></div><div class="learning-tools"><div class="view-toggle" role="group" aria-label="Lesson view"><button :class="{ active: lessonView === 'grid' }" @click="lessonView = 'grid'">Grid</button><button :class="{ active: lessonView === 'list' }" @click="lessonView = 'list'">List</button></div><a href="#progress" class="text-link">View progress <ChevronRight :size="16" /></a></div></div><div v-if="!categories.length" class="empty">Your courses will appear here once they’re published.</div><div class="category-grid"><article v-for="(category, i) in categories" :key="category.id" class="category-card" :style="{ backgroundColor: category.background_color || undefined }"><img v-if="category.thumbnail_url" class="category-thumb" :src="category.thumbnail_url" :alt="`${category.name} course artwork`"><div class="card-top"><span class="category-icon" :class="`tone-${i % 4}`"><BookOpen :size="19" /></span><span class="lesson-count">{{ category.completed_lessons }}/{{ category.total_lessons }} lessons</span></div><h3>{{ category.name }}</h3><p class="category-desc">{{ category.description || 'Build your knowledge at your own pace.' }}</p><div class="progress-meta"><span>{{ category.progress_percentage }}% complete</span><span>{{ category.total_lessons - category.completed_lessons }} to go</span></div><div class="progress-track"><span :style="{ width: `${category.progress_percentage}%` }"></span></div><div class="lesson-cards" :class="`lesson-cards-${lessonView}`"><button v-for="lesson in category.lessons.slice(lessonPage(category) * lessonsPerPage, lessonPage(category) * lessonsPerPage + lessonsPerPage)" :key="lesson.id" class="lesson-tile" :disabled="!lesson.is_unlocked" :aria-label="lesson.is_unlocked ? lesson.title : `${lesson.title} · Locked until the previous lesson is complete and its realization is submitted`" @click="watchLesson(lesson, true)"><span class="lesson-image-frame"><img v-if="lesson.thumbnail_url" :src="lesson.thumbnail_url" :alt="`${lesson.title} thumbnail`"><span v-else class="lesson-thumb-fallback"><BookOpen :size="24" /></span></span><span class="lesson-tile-copy"><b>{{ lesson.title }}</b><small>{{ !lesson.is_unlocked ? 'Locked' : lesson.progress?.is_completed ? 'Complete' : lesson.progress?.last_position_seconds ? 'Resume lesson' : 'Start lesson' }}</small></span></button></div><nav v-if="category.lessons.length > lessonsPerPage" class="lesson-pagination" :aria-label="`${category.name} lesson pages`"><button type="button" class="secondary-button" :disabled="lessonPage(category) === 0" @click="setLessonPage(category, lessonPage(category) - 1)">Previous</button><span>Page {{ lessonPage(category) + 1 }} of {{ lessonPageCount(category) }}</span><button type="button" class="secondary-button" :disabled="lessonPage(category) >= lessonPageCount(category) - 1" @click="setLessonPage(category, lessonPage(category) + 1)">Next</button></nav></article></div></section>
+        <div v-if="milestone" class="milestone-dashboard-banner"><div><p class="eyebrow">UPCOMING ZOOM DISCUSSION</p><h2>{{ milestone.lesson_title }}</h2><p>{{ milestone.message }}</p><p><b>{{ new Date(milestone.scheduled_at).toLocaleString() }}</b></p><p v-if="milestone.response_submitted" class="success">Your questions have been sent.</p></div><button class="secondary-button" type="button" @click="milestoneOpen=true">{{ milestone.response_submitted ? "View discussion" : "Share questions" }}</button><a v-if="milestone.join_url" class="primary" :href="milestone.join_url" target="_blank" rel="noopener noreferrer">Join your meeting</a></div><section id="learning" class="learning-section"><div class="section-heading"><div><p class="eyebrow">YOUR LEARNING ROADMAP</p><h2>Learning path</h2></div><div class="learning-tools"><div class="view-toggle" role="group" aria-label="Lesson view"><button :class="{ active: lessonView === 'grid' }" @click="lessonView = 'grid'">Grid</button><button :class="{ active: lessonView === 'list' }" @click="lessonView = 'list'">List</button></div><a href="#progress" class="text-link">View progress <ChevronRight :size="16" /></a></div></div><div v-if="!categories.length" class="empty">Your courses will appear here once they’re published.</div><div class="category-grid"><article v-for="(category, i) in categories" :key="category.id" class="category-card" :style="{ backgroundColor: category.background_color || undefined }"><img v-if="category.thumbnail_url" class="category-thumb" :src="category.thumbnail_url" :alt="`${category.name} course artwork`"><div class="card-top"><span class="category-icon" :class="`tone-${i % 4}`"><BookOpen :size="19" /></span><span class="lesson-count">{{ category.completed_lessons }}/{{ category.total_lessons }} lessons</span></div><h3>{{ category.name }}</h3><p class="category-desc">{{ category.description || 'Build your knowledge at your own pace.' }}</p><div class="progress-meta"><span>{{ category.progress_percentage }}% complete</span><span>{{ category.total_lessons - category.completed_lessons }} to go</span></div><div class="progress-track"><span :style="{ width: `${category.progress_percentage}%` }"></span></div><div class="lesson-cards" :class="`lesson-cards-${lessonView}`"><button v-for="lesson in category.lessons.slice(lessonPage(category) * lessonsPerPage, lessonPage(category) * lessonsPerPage + lessonsPerPage)" :key="lesson.id" class="lesson-tile" :disabled="!lesson.is_unlocked" :aria-label="lesson.is_unlocked ? lesson.title : `${lesson.title} · Locked until the previous lesson is complete and its realization is submitted`" @click="watchLesson(lesson, true)"><span class="lesson-image-frame"><img v-if="lesson.thumbnail_url" :src="lesson.thumbnail_url" :alt="`${lesson.title} thumbnail`"><span v-else class="lesson-thumb-fallback"><BookOpen :size="24" /></span></span><span class="lesson-tile-copy"><b>{{ lesson.title }}</b><small>{{ !lesson.is_unlocked ? 'Locked' : lesson.progress?.is_completed ? 'Complete' : lesson.progress?.last_position_seconds ? 'Resume lesson' : 'Start lesson' }}</small></span></button></div><nav v-if="category.lessons.length > lessonsPerPage" class="lesson-pagination" :aria-label="`${category.name} lesson pages`"><button type="button" class="secondary-button" :disabled="lessonPage(category) === 0" @click="setLessonPage(category, lessonPage(category) - 1)">Previous</button><span>Page {{ lessonPage(category) + 1 }} of {{ lessonPageCount(category) }}</span><button type="button" class="secondary-button" :disabled="lessonPage(category) >= lessonPageCount(category) - 1" @click="setLessonPage(category, lessonPage(category) + 1)">Next</button></nav></article></div></section>
         <section id="progress" class="progress-overview"><div class="section-heading"><div><p class="eyebrow">YOUR MOMENTUM</p><h2>Progress overview</h2></div></div><div class="overview-card"><div class="overall-ring" :style="{ '--progress': `${overall * 3.6}deg` }"><div><b>{{ overall }}%</b><small>overall</small></div></div><div class="overview-text"><h3>You’re building a great habit.</h3><p>You’ve finished <b>{{ completeLessons }}</b> out of <b>{{ totalLessons }}</b> available lessons. Keep going at a pace that feels right.</p></div><div class="overview-stat"><span><Check :size="17" /></span><div><b>{{ completeLessons }}</b><small>lessons completed</small></div></div></div></section>
         </template>
         <StudentZoom v-else-if="studentPage === 'zoom'" /><StudentProfile v-else :user="user" :enrollment-eligible="enrollment.eligible" @enrollment-submitted="enrollment.status = $event; enrollment.revision_reason = null" />
       </div>
     </section>
-    <div v-if="selected" class="modal-backdrop" @click.self="closeLesson"><section class="lesson-modal"><button class="modal-close" aria-label="Close lesson" @click="closeLesson"><X :size="19" /></button><p class="eyebrow">LESSON</p><h2>{{ selected.title }}</h2><p class="muted">{{ selected.description || 'Take your time and enjoy this lesson.' }}</p><div v-if="selected.video_stream_url" class="video-player-surface" @contextmenu.prevent><video class="video" controls controlsList="nodownload" disablePictureInPicture playsinline referrerpolicy="same-origin" :src="selected.video_stream_url" :data-lesson-id="selected.id" @contextmenu.prevent @loadedmetadata="resumePlayback($event, selected.id)" @play="handlePlay($event, selected.id)" @pause="handlePause($event, selected.id)" @timeupdate="handleTimeUpdate($event, selected.id)" @ended="handleEnded($event, selected.id)" /></div><div v-else class="video-placeholder"><CirclePlay :size="38" /><span>{{ selected.has_video ? (playbackInitializing ? 'Preparing your lesson video…' : 'Lesson video access is unavailable.') : 'This lesson’s video hasn’t been added yet.' }}</span></div><p v-if="playbackError" class="error playback-error" role="status">{{ playbackError }}</p><p v-if="navigationNotice" class="lesson-navigation-notice" role="status">{{ navigationNotice }}</p><button v-if="autoplayBlocked" class="primary continue-button" @click="continueAfterAutoplayBlock">Continue lesson <Play :size="16" fill="currentColor" /></button><button v-if="replayRequired" class="primary continue-button" @click="replayLesson">Replay lesson <Play :size="16" fill="currentColor" /></button><form v-if="!selected.realization_submitted" class="student-realization-form" @submit.prevent="submitRealization"><label for="student-realization">What did you take away from this lesson?</label><textarea id="student-realization" v-model="realizationText" maxlength="20000" required minlength="3" rows="3" placeholder="Write a short reflection or describe what you practiced."></textarea><p v-if="realizationNotice" class="success" role="status">{{ realizationNotice }}</p><p v-if="realizationError" class="error" role="alert">{{ realizationError }}</p><button class="primary" :disabled="realizationSaving">{{ realizationSaving ? 'Saving…' : 'Save realization' }}</button></form><p v-else class="success realization-saved" role="status">Your realization has been saved.</p><div class="modal-footer"><span><Clock3 :size="16" /> {{ formatTime(selected.duration_seconds) }}</span><span v-if="selected.progress?.is_completed" class="completed-pill"><Check :size="16" /> Lesson complete</span></div><div class="lesson-navigation"><button type="button" class="secondary-button" :disabled="!previousLesson" @click="previousLesson && watchLesson(previousLesson, false)">Previous Lesson</button><p v-if="nextLessonCandidate && !selected.progress?.is_completed" class="lesson-navigation-help">Watch at least 50% of this lesson to unlock the next lesson.</p><p v-else-if="nextLessonCandidate && !selected.realization_submitted" class="lesson-navigation-help">Submit your realization above before proceeding to the next lesson.</p><button type="button" class="primary" :disabled="!selected.progress?.is_completed || !selected.realization_submitted || !nextLesson" @click="nextLesson && watchLesson(nextLesson, false)">Next Lesson</button></div></section></div>
+    <div v-if="milestoneOpen && milestone" class="modal-backdrop" @click.self="milestoneOpen=false"><section class="milestone-popup"><button class="modal-close" aria-label="Close discussion notification" @click="milestoneOpen=false"><X :size="19" /></button><p class="eyebrow">UPCOMING ZOOM DISCUSSION</p><h2>{{ milestone.lesson_title }}</h2><img v-if="milestone.image_url" :src="milestone.image_url" alt=""><p>{{ milestone.message }}</p><p>Scheduled {{ new Date(milestone.scheduled_at).toLocaleString() }}</p><a v-if="milestone.join_url" class="primary" :href="milestone.join_url" target="_blank" rel="noopener noreferrer">Join your individual meeting</a><p v-else class="muted">Your personal Zoom registration link is not available yet.</p><template v-if="!milestone.response_submitted"><form class="student-realization-form" @submit.prevent="submitMilestoneResponse"><label for="milestone-response">Questions and expectations for the discussion</label><textarea id="milestone-response" v-model="milestoneDraft" maxlength="10000" minlength="3" required rows="4"></textarea><p v-if="milestoneError" class="error" role="alert">{{milestoneError}}</p><button class="primary" :disabled="milestoneSaving">{{milestoneSaving?"Sending…":"Send questions"}}</button></form></template><p v-else class="success">Your response has been saved.</p></section></div>    <div v-if="selected" class="modal-backdrop" @click.self="closeLesson"><section class="lesson-modal"><button class="modal-close" aria-label="Close lesson" @click="closeLesson"><X :size="19" /></button><p class="eyebrow">LESSON</p><h2>{{ selected.title }}</h2><p class="muted">{{ selected.description || 'Take your time and enjoy this lesson.' }}</p><div class="lesson-modal-columns"><div class="lesson-video-panel"><div v-if="selected.video_stream_url" class="video-player-surface" @contextmenu.prevent><video ref="lessonVideo" class="video" controls controlsList="nodownload" disablePictureInPicture playsinline referrerpolicy="same-origin" :src="selected.video_stream_url" :data-lesson-id="selected.id" @contextmenu.prevent @loadedmetadata="resumePlayback($event, selected.id)" @play="handlePlay($event, selected.id)" @pause="handlePause($event, selected.id)" @timeupdate="handleTimeUpdate($event, selected.id)" @ended="handleEnded($event, selected.id)"><track v-for="track in selected.subtitle_tracks || []" :key="track.language" kind="subtitles" :srclang="track.language" :label="track.label" :src="track.url"></video></div><div v-else class="video-placeholder"><CirclePlay :size="38" /><span>{{ selected.has_video ? (playbackInitializing ? 'Preparing your lesson video…' : 'Lesson video access is unavailable.') : 'This lesson’s video hasn’t been added yet.' }}</span></div><div v-if="selected.video_stream_url && selected.subtitle_tracks?.length" class="closed-caption-control"><button type="button" class="cc-toggle" :aria-pressed="selectedSubtitleLanguage !== 'off'" @click="toggleSubtitleCaptions">CC <span>{{ selectedSubtitleLanguage === 'off' ? 'Off' : 'On' }}</span></button><label for="lesson-closed-captions">Language</label><select id="lesson-closed-captions" :value="selectedSubtitleLanguage" @change="changeSubtitleLanguage"><option value="off">Off</option><option v-for="track in selected.subtitle_tracks" :key="track.language" :value="track.language">{{ track.label }}</option></select></div></div><div class="lesson-activity-panel"><p v-if="playbackError" class="error playback-error" role="status">{{ playbackError }}</p><p v-if="navigationNotice" class="lesson-navigation-notice" role="status">{{ navigationNotice }}</p><button v-if="autoplayBlocked" class="primary continue-button" @click="continueAfterAutoplayBlock">Continue lesson <Play :size="16" fill="currentColor" /></button><button v-if="replayRequired" class="primary continue-button" @click="replayLesson">Replay lesson <Play :size="16" fill="currentColor" /></button><form class="student-realization-form" @submit.prevent="submitRealization"><label for="student-realization">What is your take away from this lesson?</label><textarea id="student-realization" v-model="realizationText" maxlength="20000" required minlength="3" rows="3" placeholder="Write a short reflection or describe what you practiced."></textarea><label for="student-lesson-questions">Questions about this lesson <span class="optional-label">Optional</span></label><textarea id="student-lesson-questions" v-model="realizationQuestion" maxlength="10000" rows="3" placeholder="Ask a question for your teacher."></textarea><p v-if="realizationNotice" class="success" role="status">{{ realizationNotice }}</p><p v-if="realizationError" class="error" role="alert">{{ realizationError }}</p><button class="primary" :disabled="realizationSaving">{{ realizationSaving ? 'Saving…' : 'Save realization' }}</button></form><div class="modal-footer"><span><Clock3 :size="16" /> {{ formatTime(selected.duration_seconds) }}</span><span v-if="selected.progress?.is_completed" class="completed-pill"><Check :size="16" /> Lesson complete</span></div><div class="lesson-navigation"><button type="button" class="secondary-button" :disabled="!previousLesson" @click="previousLesson && watchLesson(previousLesson, false)">Previous Lesson</button><p v-if="nextLessonCandidate && !selected.progress?.is_completed" class="lesson-navigation-help">Watch at least 50% of this lesson to unlock the next lesson.</p><p v-else-if="nextLessonCandidate && !selected.realization_submitted" class="lesson-navigation-help">Submit your realization above before proceeding to the next lesson.</p><button type="button" class="primary" :disabled="!nextLesson" @click="nextLesson && watchLesson(nextLesson, false)">Next Lesson</button></div></div></div></section></div>
   </div>
 </template>
