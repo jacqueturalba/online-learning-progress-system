@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\AiOperationUsage;
 use App\Models\Lesson;
 use App\Services\WhisperxAlignmentService;
+use App\Services\WhisperxAlignmentReconciler;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
@@ -75,9 +76,11 @@ class AdminWhisperxAlignmentController extends Controller
         ], $result['already_submitted'] ? 200 : 202, ['Cache-Control' => 'private, no-store']);
     }
 
-    public function show(int $operation, WhisperxAlignmentService $alignments)
+    public function show(int $operation, WhisperxAlignmentService $alignments, WhisperxAlignmentReconciler $reconciler)
     {
         $usage = AiOperationUsage::query()->where('service', WhisperxAlignmentService::ALIGNMENT_SERVICE)->findOrFail($operation);
+        $reconciler->reconcile($usage);
+        $usage->refresh();
         return response()->json(['operation' => $alignments->safeStatus($usage)], 200, ['Cache-Control' => 'private, no-store']);
     }
 

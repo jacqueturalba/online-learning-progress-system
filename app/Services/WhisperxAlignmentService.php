@@ -7,6 +7,7 @@ use App\Models\AiOperationUsage;
 use App\Models\Lesson;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use RuntimeException;
 use Throwable;
@@ -16,7 +17,10 @@ class WhisperxAlignmentService
     public const TRANSCRIPTION_SERVICE = 'transcription';
     public const ALIGNMENT_SERVICE = 'whisperx_alignment';
 
-    public function __construct(private readonly WhisperxAlignmentExecutor $executor) {}
+    public function __construct(
+        private readonly WhisperxAlignmentExecutor $executor,
+        private readonly WhisperxAlignmentReconciler $reconciler,
+    ) {}
 
     public function transcriptVersion(Lesson $lesson, int $operationId): AiOperationUsage
     {
@@ -142,26 +146,45 @@ class WhisperxAlignmentService
             if (!$usage) throw $exception;
         }
 
-        if (!hash_equals((string) $usage->request_fingerprint, $fingerprint)) {
-            throw new RuntimeException('This alignment key is already associated with different inputs.');
-        }
-        if (!$usage->wasRecentlyCreated && in_array($usage->status, ['queued', 'processing', 'succeeded'], true)) {
-            return ['usage' => $usage, 'already_submitted' => true];
-        }
+        $isNewOperation = $usage->wasRecentlyCreated;
+        $shouldDispatch = DB::transaction(function () use (&$usage, $fingerprint, $isNewOperation): bool {
+            $locked = AiOperationUsage::query()->lockForUpdate()->findOrFail($usage->id);
+            if (!hash_equals((string) $locked->request_fingerprint, $fingerprint)) {
+                throw new RuntimeException('This alignment key is already associated with different inputs.');
+            }
+            if (!$isNewOperation && in_array($locked->status, ['queued', 'processing', 'succeeded'], true)) return false;
 
+            if (!$isNewOperation && $locked->status === 'failed'
+                && in_array($this->reconciler->queueStateFor($locked), ['pending', 'delayed', 'reserved', 'unknown'], true)) {
+                $locked->update(['status' => 'queued', 'error_code' => null, 'error_message' => null]);
+                return false;
+            }
+
+            $result = $locked->result ?? [];
+            $result['approval_status'] = 'pending_admin_review';
+            $result['outputs'] = null;
+            $result['processing_started_at'] = null;
+            $result['processing_completed_at'] = null;
+            $result['queue_token'] = (string) str()->uuid();
+            $result['heartbeat_at'] = null;
+            $result['worker_pid'] = null;
+            $result['worker_host'] = null;
+            $result['process_pid'] = null;
+            $result['process_identity'] = null;
+            $locked->update(['status' => 'queued', 'error_code' => null, 'error_message' => null, 'result' => $result]);
+            $usage = $locked->fresh();
+            return true;
+        });
+
+        if (!$shouldDispatch) return ['usage' => $usage->fresh(), 'already_submitted' => true];
         $result = $usage->result ?? [];
-        $result['approval_status'] = 'pending_admin_review';
-        $result['outputs'] = null;
-        $result['processing_started_at'] = null;
-        $result['processing_completed_at'] = null;
-        $usage->update(['status' => 'queued', 'error_code' => null, 'error_message' => null, 'result' => $result]);
 
         try {
             $payload = Crypt::encryptString(json_encode([
                 'transcript_operation_id' => $transcript->id,
                 'audio_relative_path' => $audioRelativePath,
             ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE));
-            RunWhisperxAlignment::dispatch($usage->id, $payload)
+            RunWhisperxAlignment::dispatch($usage->id, $payload, $result['queue_token'])
                 ->onConnection((string) config('whisperx.connection'))
                 ->onQueue((string) config('whisperx.queue'))
                 ->afterCommit();
@@ -199,6 +222,7 @@ class WhisperxAlignmentService
             'status' => $usage->status,
             'approval_status' => $result['approval_status'] ?? null,
             'processing_started_at' => $result['processing_started_at'] ?? null,
+            'heartbeat_at' => $result['heartbeat_at'] ?? null,
             'processing_completed_at' => $result['processing_completed_at'] ?? null,
             'error_code' => $usage->error_code,
             'error_message' => $usage->error_message,

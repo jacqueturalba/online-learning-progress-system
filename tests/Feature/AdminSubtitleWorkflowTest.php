@@ -73,7 +73,7 @@ it('queues private audio preparation once and keeps workflow actions admin-only'
     $this->getJson('/api/admin/lessons/'.$lesson->id.'/subtitle-workflow')
         ->assertOk()->assertJsonPath('preparations.0.queue.worker_stalled', true)
         ->assertJsonPath('preparations.0.queue.queue', 'whisperx-alignment')
-        ->assertJsonPath('preparations.0.queue.worker_command', 'php artisan queue:work whisperx --queue=whisperx-alignment --sleep=3 --tries=2 --timeout=7200');
+        ->assertJsonPath('preparations.0.queue.worker_command', 'php artisan queue:work whisperx --queue=whisperx-alignment --sleep=3 --tries=2 --timeout=7500');
 
     $this->actingAs($student)->getJson('/api/admin/lessons/'.$lesson->id.'/subtitle-workflow')->assertForbidden();
     $this->postJson('/api/admin/lessons/'.$lesson->id.'/subtitle-workflow/transcribe')->assertForbidden();

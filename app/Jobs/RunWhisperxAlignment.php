@@ -6,6 +6,7 @@ use App\Models\AiOperationUsage;
 use App\Services\WhisperxAlignmentException;
 use App\Services\WhisperxAlignmentExecutor;
 use App\Services\WhisperxAlignmentService;
+use App\Services\WhisperxWorkerHeartbeat;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -24,9 +25,9 @@ class RunWhisperxAlignment implements ShouldQueue
     public array $backoff = [60, 300];
     public int $timeout;
 
-    public function __construct(public readonly int $usageId, public readonly string $encryptedPayload)
+    public function __construct(public readonly int $usageId, public readonly string $encryptedPayload, public readonly string $queueToken)
     {
-        $this->timeout = max(60, (int) config('whisperx.timeout', 7200));
+        $this->timeout = max(60, (int) config('whisperx.job_timeout', 7500));
     }
 
     public function handle(WhisperxAlignmentExecutor $executor): void
@@ -56,6 +57,9 @@ class RunWhisperxAlignment implements ShouldQueue
             $startedClock = microtime(true);
             $result = $usage->result ?? [];
             $result['processing_started_at'] = $startedAt->toIso8601String();
+            $result['heartbeat_at'] = $startedAt->toIso8601String();
+            $result['worker_pid'] = getmypid();
+            $result['worker_host'] = gethostname() ?: null;
             $result['processing_completed_at'] = null;
             $result['approval_status'] = 'pending_admin_review';
             $usage->update(['status' => 'processing', 'processing_duration_ms' => null, 'error_code' => null, 'error_message' => null, 'result' => $result]);
@@ -66,6 +70,18 @@ class RunWhisperxAlignment implements ShouldQueue
                 (string) ($payload['audio_relative_path'] ?? ''),
                 $transcriptText,
                 (float) ($usage->timeline_offset_seconds ?? 0),
+                function (?int $processId = null, ?array $processIdentity = null) use ($usage): void {
+                    app(WhisperxWorkerHeartbeat::class)->touch();
+                    $fresh = $usage->fresh();
+                    if (!$fresh || $fresh->status !== 'processing') return;
+                    $result = $fresh->result ?? [];
+                    $result['heartbeat_at'] = now()->toIso8601String();
+                    $result['worker_pid'] = getmypid();
+                    $result['worker_host'] = gethostname() ?: null;
+                    if ($processId !== null) $result['process_pid'] = $processId;
+                    if ($processIdentity !== null) $result['process_identity'] = $processIdentity;
+                    $fresh->update(['result' => $result]);
+                },
             );
 
             $result = array_merge($result, $artifacts, [
