@@ -22,7 +22,12 @@ test('admin subtitle editor keeps long drafts across sections, warns before disc
   const workflow = () => ({
     lesson_id: 5,
     preparations: [],
-    transcripts: [{ operation_id: 11, status: 'succeeded', text: transcriptDraft, approved: transcriptApproved, offset_seconds: 0 }],
+    transcripts: [
+      { operation_id: 11, status: 'succeeded', text: transcriptDraft, approved: transcriptApproved, offset_seconds: 125.5,
+        audio: { url: '/api/admin/lessons/5/subtitle-audio/12', timeline_start_seconds: 5.5, duration_seconds: 3600 } },
+      { operation_id: 12, status: 'succeeded', text: 'Second audio section.', approved: false, offset_seconds: 305.5,
+        audio: { url: '/api/admin/lessons/5/subtitle-audio/12', timeline_start_seconds: 5.5, duration_seconds: 3600 } },
+    ],
     alignments: [{ operation_id: 21, status: 'succeeded', approved: true, transcript_operation_id: 11, download_version_id: 'english-v1' }],
     translations: [{ operation_id: 31, status: 'succeeded', text: translationCues.map(cue => cue.text).join('\n'), target_language: 'Filipino', cues: translationCues, cue_timed: true, approved: filipinoApproved, source_alignment_operation_id: 21, source_english_srt_version_id: 'english-v1' }],
   });
@@ -64,9 +69,30 @@ test('admin subtitle editor keeps long drafts across sections, warns before disc
   });
 
   await page.addInitScript(() => { if (location.pathname === '/login') history.replaceState({}, '', '/admin/lessons'); });
+  await page.addInitScript(() => {
+    Object.defineProperty(HTMLMediaElement.prototype, 'readyState', { configurable: true, get: () => 4 });
+    Object.defineProperty(HTMLMediaElement.prototype, 'duration', { configurable: true, get: () => 3600 });
+    Object.defineProperty(HTMLMediaElement.prototype, 'currentTime', {
+      configurable: true, get() { return (this as HTMLMediaElement & { testCurrentTime?: number }).testCurrentTime ?? 0; },
+      set(value: number) { (this as HTMLMediaElement & { testCurrentTime?: number }).testCurrentTime = value; },
+    });
+    Object.defineProperty(HTMLMediaElement.prototype, 'paused', { configurable: true, get() { return (this as HTMLMediaElement & { testPaused?: boolean }).testPaused ?? true; } });
+    HTMLMediaElement.prototype.play = function () { (this as HTMLMediaElement & { testPaused?: boolean }).testPaused = false; return Promise.resolve(); };
+    HTMLMediaElement.prototype.pause = function () { (this as HTMLMediaElement & { testPaused?: boolean }).testPaused = true; };
+    HTMLMediaElement.prototype.load = function () { queueMicrotask(() => this.dispatchEvent(new Event('loadedmetadata'))); };
+  });
+  await page.route('**/api/admin/lessons/5/subtitle-audio/12', route => route.fulfill({ status: 200, contentType: 'audio/mpeg', body: 'audio-fixture' }));
   await page.goto('/login');
   await page.getByRole('button', { name: 'Manage subtitles for One Hour Sample Lesson' }).click();
-  const transcriptEditor = page.getByRole('textbox', { name: 'English transcript draft' });
+  await expect(page.locator('audio[aria-label="Full lesson audio"]')).toHaveCount(1);
+  const sharedAudio = page.locator('audio[aria-label="Full lesson audio"]');
+  await page.getByRole('button', { name: 'Listen from 2:00' }).click();
+  await expect.poll(() => sharedAudio.evaluate(element => (element as HTMLAudioElement).currentTime)).toBe(120);
+  await sharedAudio.evaluate(element => (element as HTMLAudioElement).play());
+  await page.getByRole('button', { name: 'Listen from 5:00' }).click();
+  await expect.poll(() => sharedAudio.evaluate(element => (element as HTMLAudioElement).currentTime)).toBe(300);
+  await expect.poll(() => sharedAudio.evaluate(element => (element as HTMLAudioElement).paused)).toBe(false);
+  const transcriptEditor = page.getByRole('textbox', { name: 'English transcript draft' }).first();
   const revisedTranscript = 'A revised, long transcript that wraps naturally. '.repeat(24);
   await transcriptEditor.fill(revisedTranscript);
   page.once('dialog', dialog => {
@@ -75,8 +101,8 @@ test('admin subtitle editor keeps long drafts across sections, warns before disc
   });
   await page.getByRole('button', { name: '← Curriculum' }).click();
   await expect(transcriptEditor).toHaveValue(revisedTranscript);
-  await page.locator('.transcript-editor-toolbar').getByRole('button', { name: 'Save Changes' }).click();
-  await page.locator('.transcript-editor-toolbar').getByRole('button', { name: 'Approve English transcript' }).click();
+  await page.locator('.transcript-editor-toolbar').first().getByRole('button', { name: 'Save Changes' }).click();
+  await page.locator('.transcript-editor-toolbar').first().getByRole('button', { name: 'Approve English transcript' }).click();
   await expect.poll(() => transcriptApproved).toBe(true);
 
   const englishEditor = page.locator('.subtitle-section-editor').nth(0);
@@ -103,7 +129,7 @@ test('admin subtitle editor keeps long drafts across sections, warns before disc
 
   await page.reload();
   await page.getByRole('button', { name: 'Manage subtitles for One Hour Sample Lesson' }).click();
-  await expect(page.getByRole('textbox', { name: 'English transcript draft' })).toHaveValue(revisedTranscript);
+  await expect(page.getByRole('textbox', { name: 'English transcript draft' }).first()).toHaveValue(revisedTranscript);
   await expect(page.locator('#en-cue-21-1')).toHaveValue('Edited English cue one with a naturally wrapping sentence.');
   await expect(page.locator('#fil-cue-31-1')).toHaveValue('Binagong Filipino cue na may mahabang pangungusap na madaling basahin.');
   await page.locator('.subtitle-section-editor').nth(1).locator('.subtitle-section-picker select').selectOption('1');

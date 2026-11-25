@@ -461,6 +461,56 @@ it('reconciles an interrupted alignment only after its heartbeat expires and wor
         ->and($usage->fresh()->error_code)->toBe('WorkerInterrupted');
 });
 
+it('keeps a stale-heartbeat alignment active when its exact subprocess identity is still alive', function () {
+    if (DIRECTORY_SEPARATOR !== '\\' && (!function_exists('posix_kill') || !(new \Symfony\Component\Process\ExecutableFinder())->find('setsid'))) {
+        $this->markTestSkipped('Process identity verification requires Windows Job Object support or Linux setsid/POSIX support.');
+    }
+    Storage::fake('local');
+    $lesson = whisperxTestLesson();
+    $admin = whisperxAdmin();
+    $usage = AiOperationUsage::query()->create([
+        'service' => WhisperxAlignmentService::ALIGNMENT_SERVICE, 'model' => 'whisperx-3.8.6',
+        'lesson_id' => $lesson->id, 'status' => 'processing', 'idempotency_key' => 'whisperx-live-'.str()->uuid(),
+        'request_fingerprint' => hash('sha256', 'live alignment'),
+        'result' => ['heartbeat_at' => now()->subSeconds(385)->toIso8601String(), 'worker_pid' => getmypid(), 'worker_host' => gethostname()],
+    ]);
+    $workspace = storage_path('framework/testing/whisperx-live-'.str()->uuid());
+    $outputDirectory = Storage::disk('local')->path('whisperx-alignments/'.$lesson->id.'/'.$usage->id);
+    if (!is_dir($outputDirectory)) mkdir($outputDirectory, 0700, true);
+    if (!is_dir($workspace)) mkdir($workspace, 0700, true);
+    $runnerPath = $workspace.DIRECTORY_SEPARATOR.'fake-aligner.php';
+    file_put_contents($runnerPath, '<?php usleep(1500000);');
+    config(['whisperx.script_path' => $runnerPath]);
+    $evidence = null;
+
+    try {
+        (new SymfonyWhisperxProcessRunner())->run([PHP_BINARY, $runnerPath, '--output', $outputDirectory], 5,
+            function (?int $processId, ?array $identity) use ($usage, $admin, &$evidence): void {
+                $result = $usage->fresh()->result;
+                $result['process_pid'] = $processId;
+                $result['process_identity'] = $identity;
+                $result['heartbeat_at'] = now()->subSeconds(385)->toIso8601String();
+                $result['worker_pid'] = getmypid();
+                $result['worker_host'] = gethostname();
+                $usage->update(['result' => $result]);
+                $evidence = app(WhisperxAlignmentReconciler::class)->reconcile($usage->fresh());
+                $workflow = test()->actingAs($admin)->getJson('/api/admin/lessons/'.$usage->lesson_id.'/subtitle-workflow');
+                $workflow->assertOk();
+                $evidence['ui_worker_stalled'] = $workflow->json('alignments.0.queue.worker_stalled');
+                $evidence['ui_queue_state'] = $workflow->json('alignments.0.queue_state');
+            });
+    } finally {
+        @unlink($runnerPath);
+        @rmdir($workspace);
+    }
+
+    expect($evidence['queue_state'] ?? null)->toBe('alignment_process_active')
+        ->and($evidence['reconciled'] ?? null)->toBeFalse()
+        ->and($evidence['ui_worker_stalled'] ?? null)->toBeFalse()
+        ->and($evidence['ui_queue_state'] ?? null)->toBe('alignment_process_active')
+        ->and($usage->fresh()->status)->toBe('processing');
+});
+
 it('does not terminate a Linux process when its saved start identity no longer matches the PID', function () {
     if (DIRECTORY_SEPARATOR === '\\' || !function_exists('posix_kill')) {
         $this->markTestSkipped('Linux PID-reuse protection requires /proc and POSIX signals.');
