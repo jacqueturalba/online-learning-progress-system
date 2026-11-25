@@ -164,6 +164,10 @@ it('runs short processes successfully and terminates timed out processes', funct
     expect($exitCode)->toBe(0)->and($heartbeats)->toBeGreaterThan(0);
     expect($processIdentity['process_id'] ?? null)->toBeGreaterThan(1)
         ->and($processIdentity['creation_ticks'] ?? $processIdentity['start_ticks'] ?? null)->not->toBeNull();
+    if (DIRECTORY_SEPARATOR !== '\\') {
+        expect($processIdentity['process_group_id'] ?? null)->toBe($processIdentity['process_id'])
+            ->and($processIdentity['session_id'] ?? null)->toBe($processIdentity['process_id']);
+    }
 
     $marker = tempnam(sys_get_temp_dir(), 'whisperx-timeout-');
     expect(unlink($marker))->toBeTrue();
@@ -177,6 +181,150 @@ it('runs short processes successfully and terminates timed out processes', funct
     }
     usleep(1_000_000);
     expect(file_exists($marker))->toBeFalse('Unexpected orphan marker at '.$marker);
+});
+
+it('retries the Linux setsid transition until the actual Symfony process is isolated', function () {
+    if (DIRECTORY_SEPARATOR === '\\' || !(new \Symfony\Component\Process\ExecutableFinder())->find('setsid') || !function_exists('posix_kill')) {
+        $this->markTestSkipped('Linux setsid transition regression test did not run: Linux setsid and POSIX signals are required.');
+    }
+
+    $runner = new class extends SymfonyWhisperxProcessRunner {
+        public int $simulatedTransitionReads = 0;
+        private bool $simulateFirstRead = true;
+
+        protected function linuxProcessIdentity(int $pid): ?array
+        {
+            $identity = parent::linuxProcessIdentity($pid);
+            if ($identity !== null && $this->simulateFirstRead) {
+                $this->simulateFirstRead = false;
+                $this->simulatedTransitionReads++;
+                $identity['process_group_id'] = max(2, $pid - 1);
+                $identity['session_id'] = max(2, $pid - 2);
+            }
+            return $identity;
+        }
+    };
+    $acceptedIdentity = null;
+    $exitCode = $runner->run([PHP_BINARY, '-r', 'usleep(150000);'], 3,
+        function (?int $pid, ?array $identity) use (&$acceptedIdentity): void { $acceptedIdentity = $identity; });
+
+    expect($exitCode)->toBe(0)
+        ->and($runner->simulatedTransitionReads)->toBe(1)
+        ->and($acceptedIdentity['process_group_id'] ?? null)->toBe($acceptedIdentity['process_id'] ?? null)
+        ->and($acceptedIdentity['session_id'] ?? null)->toBe($acceptedIdentity['process_id'] ?? null);
+});
+
+it('reports a Linux process that exits before process-group verification', function () {
+    if (DIRECTORY_SEPARATOR === '\\' || !(new \Symfony\Component\Process\ExecutableFinder())->find('setsid') || !function_exists('posix_kill')) {
+        $this->markTestSkipped('Linux early-exit regression test did not run: Linux setsid and POSIX signals are required.');
+    }
+    $runner = new class extends SymfonyWhisperxProcessRunner {
+        protected function linuxProcessIdentity(int $pid): ?array
+        {
+            // Make the short-lived child exit after the liveness check but
+            // before /proc can provide a verified isolated identity.
+            usleep(120_000);
+            return parent::linuxProcessIdentity($pid);
+        }
+    };
+
+    try {
+        $runner->run([PHP_BINARY, '-r', 'usleep(10_000);'], 3);
+        test()->fail('Expected the child to exit before isolation was verified.');
+    } catch (WhisperxAlignmentException $exception) {
+        expect($exception->safeCode)->toBe('ProcessExitedBeforeIsolation');
+    }
+});
+
+it('distinguishes unreadable Linux process identity from a group transition timeout', function () {
+    if (DIRECTORY_SEPARATOR === '\\' || !(new \Symfony\Component\Process\ExecutableFinder())->find('setsid') || !function_exists('posix_kill')) {
+        $this->markTestSkipped('Linux unreadable-identity regression test did not run: Linux setsid and POSIX signals are required.');
+    }
+    $runner = new class extends SymfonyWhisperxProcessRunner {
+        protected function linuxProcessIdentity(int $pid): ?array { return null; }
+    };
+    $startedAt = microtime(true);
+    try {
+        $runner->run([PHP_BINARY, '-r', 'usleep(5_000_000);'], 5);
+        test()->fail('Expected unreadable process identity to fail closed.');
+    } catch (WhisperxAlignmentException $exception) {
+        expect($exception->safeCode)->toBe('ProcessIdentityUnavailable');
+    }
+    expect(microtime(true) - $startedAt)->toBeLessThan(2.0);
+});
+
+it('rejects a Linux PID whose start-time identity changes during startup polling', function () {
+    if (DIRECTORY_SEPARATOR === '\\' || !(new \Symfony\Component\Process\ExecutableFinder())->find('setsid') || !function_exists('posix_kill')) {
+        $this->markTestSkipped('Linux startup PID-reuse regression test did not run: Linux setsid and POSIX signals are required.');
+    }
+    $runner = new class extends SymfonyWhisperxProcessRunner {
+        private bool $simulateReusedPid = true;
+
+        protected function linuxProcessIdentity(int $pid): ?array
+        {
+            $identity = parent::linuxProcessIdentity($pid);
+            if ($identity !== null && $this->simulateReusedPid) {
+                $this->simulateReusedPid = false;
+                $identity['start_ticks'] = 'previous-process-start-time';
+                $identity['process_group_id'] = max(2, $pid - 1);
+                $identity['session_id'] = max(2, $pid - 2);
+            }
+            return $identity;
+        }
+    };
+
+    try {
+        $runner->run([PHP_BINARY, '-r', 'usleep(5_000_000);'], 5);
+        test()->fail('Expected a changed process start identity to fail closed.');
+    } catch (WhisperxAlignmentException $exception) {
+        expect($exception->safeCode)->toBe('ProcessIdentityChanged');
+    }
+});
+
+it('fails after the Linux isolation deadline without signaling a shared unrelated process group', function () {
+    if (DIRECTORY_SEPARATOR === '\\' || !(new \Symfony\Component\Process\ExecutableFinder())->find('setsid') || !function_exists('posix_kill')) {
+        $this->markTestSkipped('Linux isolation-deadline regression test did not run: Linux setsid and POSIX signals are required.');
+    }
+    $runner = new class extends SymfonyWhisperxProcessRunner {
+        protected function linuxProcessIdentity(int $pid): ?array
+        {
+            $identity = parent::linuxProcessIdentity($pid);
+            if ($identity !== null) {
+                // Simulate a readable /proc snapshot that still reports the
+                // inherited group/session rather than the setsid transition.
+                $identity['process_group_id'] = posix_getpgid(0);
+                $identity['session_id'] = posix_getsid(0);
+            }
+            return $identity;
+        }
+    };
+    $marker = tempnam(sys_get_temp_dir(), 'whisperx-unrelated-group-');
+    expect(unlink($marker))->toBeTrue();
+    $unrelated = proc_open([PHP_BINARY, '-r', '$marker = '.var_export($marker, true).'; usleep(1800000); file_put_contents($marker, "alive");'],
+        [0 => ['file', '/dev/null', 'r'], 1 => ['file', '/dev/null', 'a'], 2 => ['file', '/dev/null', 'a']], $pipes, null, null, ['bypass_shell' => true]);
+    expect(is_resource($unrelated))->toBeTrue();
+    $unrelatedPid = (int) (proc_get_status($unrelated)['pid'] ?? 0);
+    expect(posix_getpgid($unrelatedPid))->toBe(posix_getpgid(0));
+    $startedAt = microtime(true);
+
+    try {
+        try {
+            $runner->run([PHP_BINARY, '-r', 'usleep(5_000_000);'], 5);
+            test()->fail('Expected process-group verification to time out.');
+        } catch (WhisperxAlignmentException $exception) {
+            expect($exception->safeCode)->toBe('ProcessGroupIsolationTimedOut');
+        }
+        expect(microtime(true) - $startedAt)->toBeLessThan(2.0);
+        usleep(1_000_000);
+        expect(file_exists($marker))->toBeTrue('The unrelated process in the inherited group was terminated.');
+    } finally {
+        if (is_resource($unrelated)) {
+            $status = proc_get_status($unrelated);
+            if ($status['running']) @proc_terminate($unrelated, 9);
+            @proc_close($unrelated);
+        }
+        if (file_exists($marker)) @unlink($marker);
+    }
 });
 
 it('terminates descendant processes with the WhisperX process group on Linux', function () {

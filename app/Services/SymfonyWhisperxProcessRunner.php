@@ -35,11 +35,17 @@ class SymfonyWhisperxProcessRunner implements WhisperxProcessRunner
             $process->start();
             $processId = $process->getPid();
             if ($processGroupIsolated) {
-                $processIdentity = $this->linuxProcessIdentity($processId);
-                if (!$processIdentity || $processIdentity['process_group_id'] !== $processId || $processIdentity['session_id'] !== $processId) {
-                    $this->terminateProcessTree($process, $processId, false, null);
-                    throw new WhisperxAlignmentException('ProcessTreeIsolationUnavailable', 'WhisperX could not be verified inside its own process group.');
+                $verification = $this->awaitLinuxProcessIsolation($process, $processId);
+                if ($verification['status'] !== 'isolated') {
+                    [$safeCode, $message] = match ($verification['status']) {
+                        'exited' => ['ProcessExitedBeforeIsolation', 'WhisperX exited before its isolated process group could be verified.'],
+                        'identity_unavailable' => ['ProcessIdentityUnavailable', 'WhisperX process identity could not be read or parsed during startup.'],
+                        'identity_changed' => ['ProcessIdentityChanged', 'WhisperX process identity changed during startup verification.'],
+                        default => ['ProcessGroupIsolationTimedOut', 'WhisperX remained alive but did not enter its expected process group and session.'],
+                    };
+                    throw new WhisperxAlignmentException($safeCode, $message);
                 }
+                $processIdentity = $verification['identity'];
             }
             $startedAt = microtime(true);
             $lastHeartbeat = microtime(true);
@@ -275,11 +281,53 @@ CSHARP;
         }
     }
 
+    /**
+     * Wait briefly for setsid to complete its process-group/session transition.
+     * Never treat an unverified PID as an isolated group leader.
+     *
+     * @return array{status:'isolated'|'exited'|'identity_unavailable'|'group_mismatch'|'identity_changed',identity:?array}
+     */
+    private function awaitLinuxProcessIsolation(Process $process, int $processId): array
+    {
+        $deadline = microtime(true) + 1.0;
+        $pollIntervalMicroseconds = 20_000;
+        $readableIdentitySeen = false;
+        $observedStartTicks = null;
+
+        do {
+            if (!$process->isRunning()) return ['status' => 'exited', 'identity' => null];
+
+            $identity = $this->linuxProcessIdentity($processId);
+            if ($identity !== null) {
+                $readableIdentitySeen = true;
+                if ($identity['process_id'] !== $processId || !is_string($identity['start_ticks'] ?? null)) {
+                    return ['status' => 'identity_changed', 'identity' => null];
+                }
+                if ($observedStartTicks !== null && !hash_equals($observedStartTicks, $identity['start_ticks'])) {
+                    return ['status' => 'identity_changed', 'identity' => null];
+                }
+                $observedStartTicks ??= $identity['start_ticks'];
+                if ($identity['process_id'] === $processId
+                    && $identity['process_group_id'] === $processId
+                    && $identity['session_id'] === $processId) {
+                    return ['status' => 'isolated', 'identity' => $identity];
+                }
+            }
+
+            if (microtime(true) >= $deadline) break;
+            usleep($pollIntervalMicroseconds);
+        } while (true);
+
+        if (!$process->isRunning()) return ['status' => 'exited', 'identity' => null];
+        return ['status' => $readableIdentitySeen ? 'group_mismatch' : 'identity_unavailable', 'identity' => null];
+    }
+
     /** @return array{process_id:int,process_group_id:int,session_id:int,start_ticks:string}|null */
-    private function linuxProcessIdentity(int $pid): ?array
+    protected function linuxProcessIdentity(int $pid): ?array
     {
         $stat = @file_get_contents('/proc/'.$pid.'/stat');
         if (!is_string($stat) || !preg_match('/^\d+ \(.*\) (.*)$/', $stat, $matches)) return null;
+        if ((int) substr($stat, 0, strpos($stat, ' ')) !== $pid) return null;
         $fields = preg_split('/\s+/', trim($matches[1]));
         if (!is_array($fields) || count($fields) < 20 || ($fields[0] ?? '') === 'Z') return null;
         return [
