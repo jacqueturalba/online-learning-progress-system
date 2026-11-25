@@ -77,9 +77,14 @@ class ApprovedSubtitleService
         } elseif ($language === 'en' && is_string($srtText)) {
             $contents = $srtText;
         } elseif ($language === 'en') {
-            $path = $operation->result['outputs']['srt'] ?? null;
+            $draftPath = $operation->result['subtitle_draft']['srt_path'] ?? null;
+            $path = is_string($draftPath) && $disk->exists($draftPath)
+                ? $draftPath
+                : ($operation->result['outputs']['srt'] ?? null);
             if (!is_string($path) || !$disk->exists($path)) throw new RuntimeException('The aligned English SRT is unavailable.');
             $contents = $disk->get($path);
+            $expectedHash = $path === $draftPath ? ($operation->result['subtitle_draft']['srt_sha256'] ?? null) : null;
+            if (is_string($expectedHash) && !hash_equals($expectedHash, hash('sha256', $contents))) throw new RuntimeException('The reviewed English SRT draft failed its integrity check.');
         } else {
             $path = $operation->result['subtitle_draft']['srt_path'] ?? null;
             if (!is_string($path) || !$disk->exists($path)) throw new RuntimeException('A timed Filipino SRT draft is unavailable.');

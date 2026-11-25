@@ -2,6 +2,7 @@
 import { onMounted, onUnmounted, reactive, ref } from 'vue';
 import { subtitleWorkflowPollingState } from '../utils/subtitlePolling';
 import { reconcileServerDraft } from '../utils/subtitleDrafts';
+import { parseSubtitleSrt, renderSubtitleSrt, subtitleSections, type SubtitleCue, type SubtitleSection } from '../utils/subtitleEditor';
 
 type Category = { id: number; name: string; deleted_at: string | null };
 type Lesson = { id: number; category_id: number; title: string; description: string | null; video_stream_url: string | null; thumbnail_url: string | null; duration_seconds: number | null; sort_order: number; is_published: boolean; deleted_at: string | null; progress_count: number; category?: Category };
@@ -19,8 +20,13 @@ const workflowWarning = ref('');
 const workflowLoading = ref(false);
 const transcriptDrafts = reactive<Record<number, string>>({}), translationDrafts = reactive<Record<number, string>>({}), alignmentSrtDrafts = reactive<Record<number, string>>({});
 const transcriptServerValues = reactive<Record<number, string>>({}), translationServerValues = reactive<Record<number, string>>({});
-type FilipinoCue = { index: number; start: string; end: string; text: string };
-const translationCueDrafts = reactive<Record<number, FilipinoCue[]>>({}), translationCueServerValues = reactive<Record<number, string>>({});
+const translationCueDrafts = reactive<Record<number, SubtitleCue[]>>({}), translationCueServerValues = reactive<Record<number, string>>({});
+const alignmentCueDrafts = reactive<Record<number, SubtitleCue[]>>({}), alignmentCueServerValues = reactive<Record<number, string>>({});
+const alignmentSectionIndexes = reactive<Record<number, number>>({}), translationSectionIndexes = reactive<Record<number, number>>({});
+const alignmentVisitedSections = reactive<Record<number, number[]>>({}), translationVisitedSections = reactive<Record<number, number[]>>({});
+const englishSourceCues = reactive<Record<number, SubtitleCue[] | null>>({});
+const subtitleDraftSaving = reactive<Record<string, boolean>>({});
+const englishSourceLoads = new Set<number>();
 let subtitlePoll: ReturnType<typeof setTimeout> | null = null;
 let subtitlePollFailures = 0;
 const SUBTITLE_POLL_INTERVAL_MS = 10_000;
@@ -129,6 +135,71 @@ async function restore(lesson: Lesson) { error.value = ''; try { await request(`
 async function move(lesson: Lesson, direction: 'up' | 'down') { error.value = ''; try { await request(`/api/admin/lessons/${lesson.id}/move`, 'PATCH', { direction }); await load(); } catch (caught) { error.value = (caught as Error).message; } }
 function onFilter() { page.value = 1; void load(); }
 function chooseSubtitleFile(operationId: number, event: Event) { subtitleFiles[operationId] = (event.target as HTMLInputElement).files?.[0] || null; }
+function markVisited(visited: Record<number, number[]>, id: number, key: number) {
+  const keys = visited[id] ?? (visited[id] = []);
+  if (!keys.includes(key)) keys.push(key);
+}
+function alignmentSections(id: number): SubtitleSection[] { return subtitleSections(alignmentCueDrafts[id] ?? []); }
+function translationSections(id: number): SubtitleSection[] { return subtitleSections(translationCueDrafts[id] ?? []); }
+function initializeEditorSection(id: number, sections: SubtitleSection[], indexes: Record<number, number>, visited: Record<number, number[]>) {
+  if (!sections.length) return;
+  const current = Math.min(indexes[id] ?? 0, sections.length - 1);
+  indexes[id] = current;
+  markVisited(visited, id, sections[current].key);
+}
+function currentSection(sections: SubtitleSection[], indexes: Record<number, number>, id: number) { return sections[indexes[id] ?? 0] ?? null; }
+function navigateSection(id: number, sections: SubtitleSection[], indexes: Record<number, number>, visited: Record<number, number[]>, event: Event | number) {
+  const requested = typeof event === 'number' ? event : Number((event.target as HTMLSelectElement).value);
+  const index = Math.max(0, Math.min(sections.length - 1, requested));
+  indexes[id] = index;
+  if (sections[index]) markVisited(visited, id, sections[index].key);
+}
+function sectionProgress(sections: SubtitleSection[], visited: Record<number, number[]>, id: number) {
+  const reviewed = visited[id]?.filter(key => sections.some(section => section.key === key)).length ?? 0;
+  return { reviewed, total: sections.length, percent: sections.length ? Math.round(reviewed / sections.length * 100) : 0 };
+}
+function translationCuePosition(id: number, cueIndex: number) { return (translationCueDrafts[id] ?? []).findIndex(cue => cue.index === cueIndex); }
+function updateTranslationCue(id: number, cueIndex: number, event: Event) {
+  const cue = translationCueDrafts[id]?.find(item => item.index === cueIndex);
+  if (cue) cue.text = (event.target as HTMLTextAreaElement).value;
+}
+function sourceEnglishText(translationId: number, cueIndex: number) {
+  const cues = englishSourceCues[translationId];
+  return cues?.find(cue => cue.index === cueIndex)?.text ?? (cues === null ? 'The exact approved English source could not be loaded.' : 'Loading the exact approved English source…');
+}
+async function loadEnglishSourceCues(translation: any) {
+  const id = Number(translation.operation_id);
+  if (englishSourceLoads.has(id) || englishSourceCues[id] !== undefined) return;
+  englishSourceLoads.add(id);
+  try {
+    const version = subtitleVersions.value.find(item => item.operation_id === Number(translation.source_alignment_operation_id)
+      && item.language === 'en' && item.version_id === translation.source_english_srt_version_id);
+    if (!version) throw new Error('The approved English version is not listed.');
+    const response = await fetch(version.download_url, { credentials: 'same-origin', headers: { Accept: 'application/x-subrip' } });
+    if (!response.ok) throw new Error('The approved English subtitle could not be loaded.');
+    englishSourceCues[id] = parseSubtitleSrt(await response.text());
+  } catch {
+    englishSourceCues[id] = null;
+  } finally {
+    englishSourceLoads.delete(id);
+  }
+}
+function isAlignmentDraftDirty(id: number) { return alignmentCueDrafts[id] ? renderSubtitleSrt(alignmentCueDrafts[id]) !== alignmentCueServerValues[id] : alignmentSrtDrafts[id] !== alignmentCueServerValues[id]; }
+function isTranslationDraftDirty(id: number) { return translationCueDrafts[id] ? JSON.stringify(translationCueDrafts[id]) !== translationCueServerValues[id] : translationDrafts[id] !== translationServerValues[id]; }
+function hasUnsavedSubtitleEdits() {
+  return Object.keys(transcriptDrafts).some(key => transcriptDrafts[Number(key)] !== transcriptServerValues[Number(key)])
+    || Object.keys(alignmentSrtDrafts).some(key => isAlignmentDraftDirty(Number(key)))
+    || Object.keys(translationDrafts).some(key => isTranslationDraftDirty(Number(key)));
+}
+function warnBeforeUnload(event: BeforeUnloadEvent) {
+  if (!hasUnsavedSubtitleEdits()) return;
+  event.preventDefault();
+  event.returnValue = '';
+}
+function confirmCloseSubtitleWorkspace() {
+  if (hasUnsavedSubtitleEdits() && !window.confirm('You have unsaved subtitle edits. Leave this workspace and discard those edits?')) return;
+  closeSubtitleWorkspace(true);
+}
 type SubtitleChunk = { operation_id?: number | null; status?: string; error_code?: string | null; error_message?: string | null };
 function preparationHasFailedChunk(preparation: { chunks?: SubtitleChunk[] }) {
   return (preparation.chunks ?? []).some(chunk => chunk.status === 'failed');
@@ -170,13 +241,21 @@ async function refreshSubtitleWorkspace(manual = true) {
           translationCueDrafts[translation.operation_id] = structuredClone(translation.cues);
         }
         translationCueServerValues[translation.operation_id] = server;
+        initializeEditorSection(translation.operation_id, translationSections(translation.operation_id), translationSectionIndexes, translationVisitedSections);
       }
+      void loadEnglishSourceCues(translation);
     }
     for (const alignment of workflow.alignments || []) {
       if (alignment.status === 'succeeded' && alignmentSrtDrafts[alignment.operation_id] === undefined) {
         try {
           const preview = await request(`/api/admin/whisperx-alignments/${alignment.operation_id}/preview`);
           alignmentSrtDrafts[alignment.operation_id] = preview.srt_text;
+          const cues = parseSubtitleSrt(preview.srt_text);
+          alignmentCueServerValues[alignment.operation_id] = cues ? renderSubtitleSrt(cues) : preview.srt_text;
+          if (cues) {
+            alignmentCueDrafts[alignment.operation_id] = cues;
+            initializeEditorSection(alignment.operation_id, alignmentSections(alignment.operation_id), alignmentSectionIndexes, alignmentVisitedSections);
+          }
         } catch { alignmentSrtDrafts[alignment.operation_id] = ''; }
       }
     }
@@ -201,7 +280,8 @@ async function openSubtitleWorkspace(lesson: Lesson) {
   workflowError.value = ''; workflowNotice.value = ''; workflowWarning.value = ''; workflowBusy.value = false; subtitlePollFailures = 0;
   await refreshSubtitleWorkspace();
 }
-function closeSubtitleWorkspace() {
+function closeSubtitleWorkspace(confirmed = false) {
+  if (!confirmed && hasUnsavedSubtitleEdits() && !window.confirm('You have unsaved subtitle edits. Leave this workspace and discard those edits?')) return;
   stopSubtitlePolling(); subtitleLesson.value = null; subtitleWorkflow.value = null; subtitleLessonId.value = '';
 }
 async function generateEnglishTranscript() {
@@ -217,18 +297,22 @@ async function generateEnglishTranscript() {
   finally { workflowBusy.value = false; }
 }
 async function saveEnglishTranscript(transcriptId: number) {
-  if (!subtitleLesson.value) return;
-  try { await request(`/api/admin/lessons/${subtitleLesson.value.id}/transcripts/${transcriptId}/draft`, 'PUT', { text: transcriptDrafts[transcriptId] }); await refreshSubtitleWorkspace(); }
+  if (!subtitleLesson.value || subtitleDraftSaving[`transcript-${transcriptId}`]) return;
+  subtitleDraftSaving[`transcript-${transcriptId}`] = true;
+  try { await request(`/api/admin/lessons/${subtitleLesson.value.id}/transcripts/${transcriptId}/draft`, 'PUT', { text: transcriptDrafts[transcriptId] }); transcriptServerValues[transcriptId] = transcriptDrafts[transcriptId]; workflowNotice.value = 'English transcript draft saved.'; await refreshSubtitleWorkspace(); }
   catch (caught) { workflowError.value = (caught as Error).message; }
+  finally { subtitleDraftSaving[`transcript-${transcriptId}`] = false; }
 }
 async function approveEnglishTranscript(transcriptId: number) {
-  if (!subtitleLesson.value) return;
+  if (!subtitleLesson.value || subtitleDraftSaving[`approve-transcript-${transcriptId}`]) return;
+  subtitleDraftSaving[`approve-transcript-${transcriptId}`] = true;
   try {
     await request(`/api/admin/lessons/${subtitleLesson.value.id}/transcripts/${transcriptId}/draft`, 'PUT', { text: transcriptDrafts[transcriptId] });
     await request(`/api/admin/lessons/${subtitleLesson.value.id}/transcripts/${transcriptId}/approve`, 'POST', { language: 'en' });
     workflowNotice.value = 'English transcript approved.'; await refreshSubtitleWorkspace();
   }
   catch (caught) { workflowError.value = (caught as Error).message; }
+  finally { subtitleDraftSaving[`approve-transcript-${transcriptId}`] = false; }
 }
 async function alignEnglishTranscript(transcriptId: number) {
   if (!subtitleLesson.value) return;
@@ -238,11 +322,27 @@ async function alignEnglishTranscript(transcriptId: number) {
   finally { workflowBusy.value = false; }
 }
 async function approveEnglishSubtitle(alignmentId: number) {
-  if (!subtitleLesson.value) return;
+  const sections = alignmentSections(alignmentId);
+  if (!subtitleLesson.value || subtitleDraftSaving[`approve-alignment-${alignmentId}`] || sectionProgress(sections, alignmentVisitedSections, alignmentId).reviewed < sections.length || isAlignmentDraftDirty(alignmentId)) return;
+  subtitleDraftSaving[`approve-alignment-${alignmentId}`] = true;
   try {
-    await request(`/api/admin/lessons/${subtitleLesson.value.id}/subtitles/${alignmentId}/en/approve`, 'POST', { srt_text: alignmentSrtDrafts[alignmentId] });
+    await request(`/api/admin/lessons/${subtitleLesson.value.id}/subtitles/${alignmentId}/en/approve`, 'POST', { srt_text: alignmentCueDrafts[alignmentId] ? renderSubtitleSrt(alignmentCueDrafts[alignmentId]) : alignmentSrtDrafts[alignmentId] });
     await refreshSubtitleWorkspace();
   } catch (caught) { workflowError.value = (caught as Error).message; }
+  finally { subtitleDraftSaving[`approve-alignment-${alignmentId}`] = false; }
+}
+async function saveEnglishSubtitleDraft(alignmentId: number) {
+  if (!subtitleLesson.value || subtitleDraftSaving[`alignment-${alignmentId}`]) return;
+  const srtText = alignmentCueDrafts[alignmentId] ? renderSubtitleSrt(alignmentCueDrafts[alignmentId]) : alignmentSrtDrafts[alignmentId];
+  subtitleDraftSaving[`alignment-${alignmentId}`] = true;
+  workflowError.value = '';
+  try {
+    await request(`/api/admin/lessons/${subtitleLesson.value.id}/whisperx-alignments/${alignmentId}/draft`, 'PUT', { srt_text: srtText });
+    alignmentCueServerValues[alignmentId] = srtText;
+    alignmentSrtDrafts[alignmentId] = srtText;
+    workflowNotice.value = 'English subtitle changes saved as a private draft. They are not approved yet.';
+  } catch (caught) { workflowError.value = (caught as Error).message; }
+  finally { subtitleDraftSaving[`alignment-${alignmentId}`] = false; }
 }
 async function generateFilipinoTranslation(transcriptId: number, alignmentId: number, versionId: string) {
   if (!subtitleLesson.value) return;
@@ -253,16 +353,24 @@ async function generateFilipinoTranslation(transcriptId: number, alignmentId: nu
   finally { workflowBusy.value = false; }
 }
 async function saveFilipinoTranslation(translationId: number) {
-  if (!subtitleLesson.value) return;
+  if (!subtitleLesson.value || subtitleDraftSaving[`translation-${translationId}`]) return;
+  subtitleDraftSaving[`translation-${translationId}`] = true;
   try {
     const cues = translationCueDrafts[translationId];
     await request(`/api/admin/lessons/${subtitleLesson.value.id}/translations/${translationId}/draft`, 'PUT', cues?.length ? { cues: cues.map(({ index, text }) => ({ index, text })) } : { text: translationDrafts[translationId] });
+    if (cues?.length) translationCueServerValues[translationId] = JSON.stringify(cues);
+    else translationServerValues[translationId] = translationDrafts[translationId];
+    workflowNotice.value = 'Filipino subtitle changes saved.';
     await refreshSubtitleWorkspace();
   }
   catch (caught) { workflowError.value = (caught as Error).message; }
+  finally { subtitleDraftSaving[`translation-${translationId}`] = false; }
 }
 async function approveFilipinoSubtitle(translationId: number) {
-  if (!subtitleLesson.value) return;
+  if (!subtitleLesson.value || subtitleDraftSaving[`approve-translation-${translationId}`]) return;
+  const sections = translationSections(translationId);
+  if (sections.length && sectionProgress(sections, translationVisitedSections, translationId).reviewed < sections.length) return;
+  subtitleDraftSaving[`approve-translation-${translationId}`] = true;
   const file = subtitleFiles[translationId];
   const body = file ? new FormData() : {};
   if (file && body instanceof FormData) body.append('srt_file', file);
@@ -272,16 +380,17 @@ async function approveFilipinoSubtitle(translationId: number) {
     await request(`/api/admin/lessons/${subtitleLesson.value.id}/subtitles/${translationId}/fil/approve`, 'POST', body);
     delete subtitleFiles[translationId]; workflowNotice.value = 'Filipino subtitle version approved.'; await refreshSubtitleWorkspace();
   } catch (caught) { workflowError.value = (caught as Error).message; }
+  finally { subtitleDraftSaving[`approve-translation-${translationId}`] = false; }
 }
 let searchTimer: ReturnType<typeof setTimeout>;
 function searchChanged() { clearTimeout(searchTimer); page.value = 1; searchTimer = setTimeout(load, 250); }
-onMounted(() => { resetForm(); void load(); });
-onUnmounted(stopSubtitlePolling);
+onMounted(() => { window.addEventListener('beforeunload', warnBeforeUnload); resetForm(); void load(); });
+onUnmounted(() => { stopSubtitlePolling(); window.removeEventListener('beforeunload', warnBeforeUnload); });
 </script>
 
 <template>
   <div v-if="subtitleLesson" class="subtitle-management-workspace">
-    <header class="subtitle-workspace-header"><button class="secondary-button" type="button" @click="closeSubtitleWorkspace">← Curriculum</button><div><p class="eyebrow">CURRICULUM · LESSONS</p><h2>{{ subtitleLesson.title }} · Subtitle Management</h2></div></header>
+    <header class="subtitle-workspace-header"><button class="secondary-button" type="button" @click="confirmCloseSubtitleWorkspace">← Curriculum</button><div><p class="eyebrow">CURRICULUM · LESSONS</p><h2>{{ subtitleLesson.title }} · Subtitle Management</h2></div></header>
     <p v-if="workflowError" class="student-error" role="alert">{{ workflowError }}</p>
     <p v-if="workflowNotice" class="category-notice" role="status">{{ workflowNotice }}</p>
     <p v-if="workflowWarning" class="subtitle-worker-warning" role="status">{{ workflowWarning }}</p>
@@ -303,16 +412,12 @@ onUnmounted(stopSubtitlePolling);
         </div>
         <article v-for="transcript in subtitleWorkflow.transcripts" :key="transcript.operation_id" class="subtitle-operation-row">
           <div class="subtitle-operation-heading"><strong>Transcript #{{ transcript.operation_id }}</strong><span class="category-state" :class="transcript.approved ? 'available' : transcript.status === 'failed' ? 'unavailable' : 'archived'">{{ transcript.approved ? 'Approved' : transcript.status === 'succeeded' ? 'Pending review' : transcript.status }}</span></div>
-          <small>Timeline offset {{ Number(transcript.offset_seconds || 0).toFixed(3) }} seconds</small>
+          <small>Timeline offset {{ Number(transcript.offset_seconds || 0).toFixed(3) }} seconds · {{ (transcriptDrafts[transcript.operation_id] || '').length.toLocaleString() }} characters</small>
           <small v-if="transcript.recovered_artifact" class="subtitle-recovery-note">Recovered from existing private files. This is a new draft awaiting review. Historical alignment input association is unverified.</small>
           <small v-if="transcript.recovered_artifact" v-for="candidate in transcript.recovery_details?.source_audio_candidates || []" :key="candidate.sha256" class="muted">Audio candidate {{ candidate.path }} · SHA-256 {{ candidate.sha256 }}</small>
           <p v-if="transcript.error_message" class="student-error">{{ transcript.error_message }}</p>
-          <textarea v-model="transcriptDrafts[transcript.operation_id]" :disabled="transcript.status !== 'succeeded'" rows="5" aria-label="English transcript draft"></textarea>
-          <div class="subtitle-actions">
-            <button class="secondary-button" type="button" :disabled="transcript.status !== 'succeeded'" @click="saveEnglishTranscript(transcript.operation_id)">Save transcript draft</button>
-            <button class="secondary-button" type="button" :disabled="transcript.status !== 'succeeded' || transcript.approved" @click="approveEnglishTranscript(transcript.operation_id)">Approve English transcript</button>
-            <button class="secondary-button" type="button" :disabled="!transcript.approved || workflowBusy" @click="alignEnglishTranscript(transcript.operation_id)">Align with WhisperX</button>
-          </div>
+          <div class="subtitle-editor-toolbar transcript-editor-toolbar"><div class="subtitle-editor-context"><strong>{{ subtitleLesson.title }} · English transcript</strong><small>Timeline offset {{ Number(transcript.offset_seconds || 0).toFixed(3) }}s · {{ (transcriptDrafts[transcript.operation_id] || '').length.toLocaleString() }} characters</small><span class="category-state" :class="transcript.approved ? 'available' : transcript.status === 'failed' ? 'unavailable' : 'archived'">{{ transcript.approved ? 'Approved' : transcript.status === 'succeeded' ? 'Pending review' : transcript.status }}</span></div><div class="subtitle-section-actions"><button class="secondary-button" type="button" :disabled="transcript.status !== 'succeeded' || subtitleDraftSaving[`transcript-${transcript.operation_id}`]" @click="saveEnglishTranscript(transcript.operation_id)">{{ subtitleDraftSaving[`transcript-${transcript.operation_id}`] ? 'Saving…' : 'Save Changes' }}</button><button class="secondary-button" type="button" :disabled="transcript.status !== 'succeeded' || transcript.approved || subtitleDraftSaving[`approve-transcript-${transcript.operation_id}`]" @click="approveEnglishTranscript(transcript.operation_id)">Approve English transcript</button><button class="secondary-button" type="button" :disabled="!transcript.approved || workflowBusy" @click="alignEnglishTranscript(transcript.operation_id)">Align with WhisperX</button></div></div>
+          <textarea class="subtitle-long-editor english-transcript-editor" v-model="transcriptDrafts[transcript.operation_id]" :disabled="transcript.status !== 'succeeded'" rows="12" aria-label="English transcript draft"></textarea>
         </article>
       </section>
 
@@ -323,8 +428,20 @@ onUnmounted(stopSubtitlePolling);
           <div class="subtitle-operation-heading"><strong>Alignment #{{ alignment.operation_id }}</strong><span class="category-state" :class="alignment.approved ? 'available' : alignment.status === 'failed' ? 'unavailable' : 'archived'">{{ alignment.approved ? 'Approved' : alignment.status === 'succeeded' ? 'Pending subtitle review' : alignment.status }}</span></div>
           <p v-if="alignment.error_message" class="student-error">{{ alignment.error_message }}</p>
           <small v-if="alignment.recovered_artifact" class="subtitle-recovery-note">Recovered alignment draft. Historical audio input association is unverified; timestamps are relative to the supplied chunk with no original lesson offset applied.</small>
-          <textarea v-if="alignment.status === 'succeeded'" v-model="alignmentSrtDrafts[alignment.operation_id]" rows="8" aria-label="English SRT review draft"></textarea>
-          <button v-if="alignment.status === 'succeeded'" class="secondary-button" type="button" @click="approveEnglishSubtitle(alignment.operation_id)">{{ alignment.approved ? 'Approve revised English SRT' : 'Approve English SRT' }}</button>
+          <template v-if="alignment.status === 'succeeded'">
+            <div v-if="alignmentCueDrafts[alignment.operation_id]?.length" class="subtitle-section-editor">
+              <div class="subtitle-editor-toolbar">
+                <div class="subtitle-editor-context"><strong>{{ subtitleLesson.title }} · English subtitles</strong><small>{{ currentSection(alignmentSections(alignment.operation_id), alignmentSectionIndexes, alignment.operation_id)?.range }} · Section {{ (alignmentSectionIndexes[alignment.operation_id] ?? 0) + 1 }} of {{ alignmentSections(alignment.operation_id).length }}</small><span class="category-state" :class="alignment.approved ? 'available' : 'archived'">{{ alignment.approved ? 'Approved · revise' : 'Pending review' }}</span></div>
+                <label class="subtitle-section-picker">Go to section<select :value="alignmentSectionIndexes[alignment.operation_id] ?? 0" @change="navigateSection(alignment.operation_id, alignmentSections(alignment.operation_id), alignmentSectionIndexes, alignmentVisitedSections, $event)"><option v-for="(section, sectionIndex) in alignmentSections(alignment.operation_id)" :key="section.key" :value="sectionIndex">Section {{ sectionIndex + 1 }} · {{ section.range }}</option></select></label>
+                <div class="subtitle-section-navigation"><button type="button" class="secondary-button" :disabled="(alignmentSectionIndexes[alignment.operation_id] ?? 0) <= 0" @click="navigateSection(alignment.operation_id, alignmentSections(alignment.operation_id), alignmentSectionIndexes, alignmentVisitedSections, (alignmentSectionIndexes[alignment.operation_id] ?? 0) - 1)">Previous Section</button><button type="button" class="secondary-button" :disabled="(alignmentSectionIndexes[alignment.operation_id] ?? 0) >= alignmentSections(alignment.operation_id).length - 1" @click="navigateSection(alignment.operation_id, alignmentSections(alignment.operation_id), alignmentSectionIndexes, alignmentVisitedSections, (alignmentSectionIndexes[alignment.operation_id] ?? 0) + 1)">Next Section</button></div>
+                <div class="subtitle-section-progress"><span>Review progress · {{ sectionProgress(alignmentSections(alignment.operation_id), alignmentVisitedSections, alignment.operation_id).reviewed }}/{{ alignmentSections(alignment.operation_id).length }} sections ({{ sectionProgress(alignmentSections(alignment.operation_id), alignmentVisitedSections, alignment.operation_id).percent }}%)</span><progress :value="sectionProgress(alignmentSections(alignment.operation_id), alignmentVisitedSections, alignment.operation_id).reviewed" :max="alignmentSections(alignment.operation_id).length" :aria-label="`English review progress for alignment ${alignment.operation_id}`"></progress></div>
+                <div class="subtitle-section-actions"><button class="secondary-button" type="button" :disabled="subtitleDraftSaving[`alignment-${alignment.operation_id}`]" @click="saveEnglishSubtitleDraft(alignment.operation_id)">{{ subtitleDraftSaving[`alignment-${alignment.operation_id}`] ? 'Saving…' : 'Save Changes' }}</button><button class="primary" type="button" :disabled="sectionProgress(alignmentSections(alignment.operation_id), alignmentVisitedSections, alignment.operation_id).reviewed < alignmentSections(alignment.operation_id).length || isAlignmentDraftDirty(alignment.operation_id) || subtitleDraftSaving[`alignment-${alignment.operation_id}`] || subtitleDraftSaving[`approve-alignment-${alignment.operation_id}`]" :title="sectionProgress(alignmentSections(alignment.operation_id), alignmentVisitedSections, alignment.operation_id).reviewed < alignmentSections(alignment.operation_id).length ? 'Review every section before approval.' : isAlignmentDraftDirty(alignment.operation_id) ? 'Save your changes before approval.' : undefined" @click="approveEnglishSubtitle(alignment.operation_id)">{{ alignment.approved ? 'Approve revised English SRT' : 'Approve English SRT' }}</button></div>
+              </div>
+              <p v-if="isAlignmentDraftDirty(alignment.operation_id)" class="subtitle-unsaved-note" role="status">Unsaved changes. They will remain in this workspace while you move between sections.</p>
+              <div class="subtitle-cue-list"><article v-for="cue in currentSection(alignmentSections(alignment.operation_id), alignmentSectionIndexes, alignment.operation_id)?.cues || []" :key="cue.index" class="subtitle-cue-card"><small class="subtitle-cue-timing">Cue {{ cue.index }} · {{ cue.start }} → {{ cue.end }}</small><label class="sr-only" :for="`en-cue-${alignment.operation_id}-${cue.index}`">English subtitle cue {{ cue.index }}</label><textarea :id="`en-cue-${alignment.operation_id}-${cue.index}`" v-model="cue.text" class="subtitle-long-editor subtitle-cue-input" rows="3"></textarea></article></div>
+            </div>
+            <div v-else class="subtitle-operation-row"><label class="subtitle-fallback-label" :for="`en-srt-${alignment.operation_id}`">English SRT review draft</label><textarea :id="`en-srt-${alignment.operation_id}`" v-model="alignmentSrtDrafts[alignment.operation_id]" class="subtitle-long-editor" rows="18" aria-label="English SRT review draft"></textarea><div class="subtitle-actions"><button class="secondary-button" type="button" :disabled="subtitleDraftSaving[`alignment-${alignment.operation_id}`]" @click="saveEnglishSubtitleDraft(alignment.operation_id)">Save Changes</button><button class="primary" type="button" :disabled="isAlignmentDraftDirty(alignment.operation_id)" @click="approveEnglishSubtitle(alignment.operation_id)">{{ alignment.approved ? 'Approve revised English SRT' : 'Approve English SRT' }}</button></div></div>
+          </template>
           <button v-if="alignment.approved && alignment.download_version_id && alignment.transcript_operation_id" class="secondary-button" type="button" :disabled="workflowBusy" @click="generateFilipinoTranslation(alignment.transcript_operation_id, alignment.operation_id, alignment.download_version_id)">Translate this approved English SRT into Filipino</button>
         </article>
       </section>
@@ -336,18 +453,20 @@ onUnmounted(stopSubtitlePolling);
           <div class="subtitle-operation-heading"><strong>Translation #{{ translation.operation_id }}</strong><span class="category-state" :class="translation.approved ? 'available' : translation.status === 'failed' ? 'unavailable' : 'archived'">{{ translation.approved ? 'Approved' : translation.status === 'succeeded' ? 'Pending review' : translation.status }}</span></div>
           <small>Target language: {{ translation.target_language || 'Filipino (legacy target)' }}</small>
           <p v-if="translation.error_message" class="student-error">{{ translation.error_message }}</p>
-          <div v-if="translation.cues?.length" class="filipino-cue-review">
-            <label v-for="(cue, cueIndex) in translationCueDrafts[translation.operation_id] || translation.cues" :key="cue.index" class="filipino-cue-row">
-              <small>{{ cue.index }} · {{ cue.start }} → {{ cue.end }}</small>
-              <textarea v-model="translationCueDrafts[translation.operation_id][cueIndex].text" :disabled="translation.status !== 'succeeded'" rows="2" :aria-label="`Filipino cue ${cue.index}`"></textarea>
-            </label>
+          <div v-if="translation.cues?.length" class="subtitle-section-editor">
+            <div class="subtitle-editor-toolbar">
+              <div class="subtitle-editor-context"><strong>{{ subtitleLesson.title }} · Filipino subtitles</strong><small>{{ currentSection(translationSections(translation.operation_id), translationSectionIndexes, translation.operation_id)?.range }} · Section {{ (translationSectionIndexes[translation.operation_id] ?? 0) + 1 }} of {{ translationSections(translation.operation_id).length }}</small><span class="category-state" :class="translation.approved ? 'available' : 'archived'">{{ translation.approved ? 'Approved · revise' : 'Pending review' }}</span></div>
+              <label class="subtitle-section-picker">Go to section<select :value="translationSectionIndexes[translation.operation_id] ?? 0" @change="navigateSection(translation.operation_id, translationSections(translation.operation_id), translationSectionIndexes, translationVisitedSections, $event)"><option v-for="(section, sectionIndex) in translationSections(translation.operation_id)" :key="section.key" :value="sectionIndex">Section {{ sectionIndex + 1 }} · {{ section.range }}</option></select></label>
+              <div class="subtitle-section-navigation"><button type="button" class="secondary-button" :disabled="(translationSectionIndexes[translation.operation_id] ?? 0) <= 0" @click="navigateSection(translation.operation_id, translationSections(translation.operation_id), translationSectionIndexes, translationVisitedSections, (translationSectionIndexes[translation.operation_id] ?? 0) - 1)">Previous Section</button><button type="button" class="secondary-button" :disabled="(translationSectionIndexes[translation.operation_id] ?? 0) >= translationSections(translation.operation_id).length - 1" @click="navigateSection(translation.operation_id, translationSections(translation.operation_id), translationSectionIndexes, translationVisitedSections, (translationSectionIndexes[translation.operation_id] ?? 0) + 1)">Next Section</button></div>
+              <div class="subtitle-section-progress"><span>Review progress · {{ sectionProgress(translationSections(translation.operation_id), translationVisitedSections, translation.operation_id).reviewed }}/{{ translationSections(translation.operation_id).length }} sections ({{ sectionProgress(translationSections(translation.operation_id), translationVisitedSections, translation.operation_id).percent }}%)</span><progress :value="sectionProgress(translationSections(translation.operation_id), translationVisitedSections, translation.operation_id).reviewed" :max="translationSections(translation.operation_id).length" :aria-label="`Filipino review progress for translation ${translation.operation_id}`"></progress></div>
+              <div class="subtitle-section-actions"><button class="secondary-button" type="button" :disabled="translation.status !== 'succeeded' || subtitleDraftSaving[`translation-${translation.operation_id}`]" @click="saveFilipinoTranslation(translation.operation_id)">{{ subtitleDraftSaving[`translation-${translation.operation_id}`] ? 'Saving…' : 'Save Changes' }}</button><button class="primary" type="button" :disabled="translation.status !== 'succeeded' || (translation.cues?.length && sectionProgress(translationSections(translation.operation_id), translationVisitedSections, translation.operation_id).reviewed < translationSections(translation.operation_id).length) || subtitleDraftSaving[`approve-translation-${translation.operation_id}`]" :title="translation.cues?.length && sectionProgress(translationSections(translation.operation_id), translationVisitedSections, translation.operation_id).reviewed < translationSections(translation.operation_id).length ? 'Review every section before approval.' : undefined" @click="approveFilipinoSubtitle(translation.operation_id)">{{ translation.approved ? 'Approve revised Filipino SRT' : 'Approve Filipino subtitles' }}</button></div>
+            </div>
+            <div class="subtitle-cue-list filipino-cue-review"><article v-for="cue in currentSection(translationSections(translation.operation_id), translationSectionIndexes, translation.operation_id)?.cues || []" :key="cue.index" class="filipino-cue-row subtitle-cue-card"><small class="subtitle-cue-timing">Cue {{ cue.index }} · {{ cue.start }} → {{ cue.end }}</small><div class="filipino-source-text"><strong>English source</strong><p>{{ sourceEnglishText(translation.operation_id, cue.index) }}</p></div><label class="filipino-translation-label" :for="`fil-cue-${translation.operation_id}-${cue.index}`">Filipino translation</label><textarea :id="`fil-cue-${translation.operation_id}-${cue.index}`" :value="translationCueDrafts[translation.operation_id][translationCuePosition(translation.operation_id, cue.index)]?.text" :disabled="translation.status !== 'succeeded'" rows="4" class="subtitle-long-editor subtitle-cue-input" :aria-label="`Filipino cue ${cue.index}`" @input="updateTranslationCue(translation.operation_id, cue.index, $event)"></textarea></article></div>
           </div>
-          <textarea v-else v-model="translationDrafts[translation.operation_id]" :disabled="translation.status !== 'succeeded'" rows="5" aria-label="Filipino translation draft"></textarea>
-          <div class="subtitle-actions">
-            <button class="secondary-button" type="button" :disabled="translation.status !== 'succeeded'" @click="saveFilipinoTranslation(translation.operation_id)">Save Filipino draft</button>
-            <label>Optional timed Filipino SRT override<input type="file" accept=".srt,application/x-subrip,text/plain" :aria-label="`Filipino SRT for translation ${translation.operation_id}`" @change="chooseSubtitleFile(translation.operation_id, $event)"></label>
-            <button class="secondary-button" type="button" :disabled="translation.status !== 'succeeded'" @click="approveFilipinoSubtitle(translation.operation_id)">{{ translation.approved ? 'Approve revised Filipino SRT' : 'Approve Filipino subtitles' }}</button>
-          </div>
+          <textarea v-else v-model="translationDrafts[translation.operation_id]" class="subtitle-long-editor filipino-legacy-editor" :disabled="translation.status !== 'succeeded'" rows="12" aria-label="Filipino translation draft"></textarea>
+          <div v-if="!translation.cues?.length" class="subtitle-actions subtitle-persistent-actions"><button class="secondary-button" type="button" :disabled="translation.status !== 'succeeded' || subtitleDraftSaving[`translation-${translation.operation_id}`]" @click="saveFilipinoTranslation(translation.operation_id)">{{ subtitleDraftSaving[`translation-${translation.operation_id}`] ? 'Saving…' : 'Save Changes' }}</button><button class="secondary-button" type="button" :disabled="translation.status !== 'succeeded'" @click="approveFilipinoSubtitle(translation.operation_id)">{{ translation.approved ? 'Approve revised Filipino SRT' : 'Approve Filipino subtitles' }}</button></div>
+          <div class="subtitle-actions"><label>Optional timed Filipino SRT override<input type="file" accept=".srt,application/x-subrip,text/plain" :aria-label="`Filipino SRT for translation ${translation.operation_id}`" @change="chooseSubtitleFile(translation.operation_id, $event)"></label></div>
+          <p v-if="isTranslationDraftDirty(translation.operation_id)" class="subtitle-unsaved-note" role="status">Unsaved changes. They will remain in this workspace while you move between sections.</p>
           <small v-if="translation.cue_timed">Cue order and timestamps are inherited from the exact approved English SRT version.</small>
           <small v-else>Legacy text-only translations require a timed SRT upload before approval.</small>
         </article>

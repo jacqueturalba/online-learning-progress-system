@@ -50,6 +50,7 @@ Route::prefix('/api/admin')->middleware(['auth', 'role:admin'])->group(function 
     Route::post('/lessons/{lesson}/whisperx-alignments', [App\Http\Controllers\AdminWhisperxAlignmentController::class, 'queue']);
     Route::get('/whisperx-alignments/{operation}', [App\Http\Controllers\AdminWhisperxAlignmentController::class, 'show']);
     Route::get('/whisperx-alignments/{operation}/preview', [App\Http\Controllers\AdminSubtitleController::class, 'previewAlignment']);
+    Route::put('/lessons/{lesson}/whisperx-alignments/{operation}/draft', [App\Http\Controllers\AdminSubtitleController::class, 'saveAlignmentDraft']);
     Route::get('/whisperx-alignments/{operation}/srt', [App\Http\Controllers\AdminWhisperxAlignmentController::class, 'srt']);
     Route::get('/dashboard', App\Http\Controllers\AdminDashboardController::class);
     Route::get('/students', [App\Http\Controllers\AdminStudentController::class, 'index']);
