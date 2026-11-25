@@ -8,13 +8,21 @@ return new class extends Migration
 {
     public function up(): void
     {
-        Schema::table('users', function (Blueprint $table): void {
-            $table->string('who_invited', 191)->nullable();
-        });
+        if (! Schema::hasColumn('users', 'who_invited')) {
+            Schema::table('users', function (Blueprint $table): void {
+                $table->string('who_invited', 191)->nullable();
+            });
+        }
 
-        Schema::table('student_realizations', function (Blueprint $table): void {
-            $table->text('questions')->nullable();
-        });
+        if (! Schema::hasColumn('student_realizations', 'questions')) {
+            Schema::table('student_realizations', function (Blueprint $table): void {
+                $table->text('questions')->nullable();
+            });
+        }
+
+        if (Schema::hasTable('student_milestone_responses')) {
+            throw new RuntimeException('The student_milestone_responses table already exists. Inspect its columns, indexes, and foreign keys before retrying this migration.');
+        }
 
         Schema::create('student_milestone_responses', function (Blueprint $table): void {
             $table->id();
@@ -24,7 +32,7 @@ return new class extends Migration
             $table->timestamp('scheduled_at')->nullable();
             $table->string('milestone_key', 64);
             $table->text('response');
-            $table->timestamp('submitted_at');
+            $table->dateTime('submitted_at');
             $table->timestamps();
             $table->unique(['student_id', 'milestone_key']);
             $table->index(['lesson_id', 'submitted_at']);
@@ -34,7 +42,11 @@ return new class extends Migration
     public function down(): void
     {
         Schema::dropIfExists('student_milestone_responses');
-        Schema::table('student_realizations', fn (Blueprint $table) => $table->dropColumn('questions'));
-        Schema::table('users', fn (Blueprint $table) => $table->dropColumn('who_invited'));
+        if (Schema::hasColumn('student_realizations', 'questions')) {
+            Schema::table('student_realizations', fn (Blueprint $table) => $table->dropColumn('questions'));
+        }
+        if (Schema::hasColumn('users', 'who_invited')) {
+            Schema::table('users', fn (Blueprint $table) => $table->dropColumn('who_invited'));
+        }
     }
 };
