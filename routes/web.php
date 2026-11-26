@@ -77,6 +77,8 @@ Route::prefix('/api/admin')->middleware(['auth', 'role:admin'])->group(function 
     Route::get('/branding', [App\Http\Controllers\BrandingController::class, 'show']);
     Route::put('/branding', [App\Http\Controllers\BrandingController::class, 'update']);
     Route::get('/ai-integrations', [App\Http\Controllers\AdminAiIntegrationController::class, 'index'])->can('viewAny', App\Models\AiIntegration::class);
+    Route::get('/subtitle-processing-method', [App\Http\Controllers\AdminSubtitleProcessingMethodController::class, 'show']);
+    Route::put('/subtitle-processing-method', [App\Http\Controllers\AdminSubtitleProcessingMethodController::class, 'update']);
     Route::post('/ai-integrations', [App\Http\Controllers\AdminAiIntegrationController::class, 'store'])->can('create', App\Models\AiIntegration::class);
     Route::put('/ai-integrations/{integration}', [App\Http\Controllers\AdminAiIntegrationController::class, 'update'])->can('update', 'integration');
     Route::patch('/ai-integrations/{integration}/status', [App\Http\Controllers\AdminAiIntegrationController::class, 'setStatus'])->can('update', 'integration');

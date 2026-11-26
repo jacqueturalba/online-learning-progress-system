@@ -10,6 +10,11 @@ type Lesson = { id: number; category_id: number; title: string; description: str
 type SubtitleVersion = { operation_id: number; language: 'en' | 'fil'; version_id: string; approved_at: string | null; is_current: boolean; download_url: string };
 type SubtitleWorkflow = { preparations: any[]; transcripts: any[]; alignments: any[]; translations: any[] };
 const MAX_VIDEO_SIZE_BYTES = 1000 * 1024 * 1024;
+const processingMethodLabel = (method: string) => ({
+  whisperx_standard: 'WhisperX standard',
+  whisperx_bounded: 'WhisperX bounded windows',
+  openai_whisper1: 'OpenAI Whisper-1 word timestamps',
+} as Record<string, string>)[method] || method;
 const csrf = () => document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content || '';
 const lessons = ref<Lesson[]>([]), categories = ref<Category[]>([]), total = ref(0), loading = ref(false), saving = ref(false), uploading = ref(false), uploadPercent = ref<number | null>(null), error = ref(''), notice = ref('');
 const search = ref(''), categoryId = ref(''), status = ref('all'), page = ref(1), lastPage = ref(1), editing = ref<number | null>(null);
@@ -464,13 +469,22 @@ onUnmounted(() => { stopSubtitlePolling(); window.removeEventListener('beforeunl
       </section>
 
       <section class="lesson-list-panel subtitle-workflow-section">
-        <div class="category-editor-heading"><div><h3>English subtitles</h3><p class="muted">Review the aligned SRT, edit if needed, then approve an immutable version.</p></div></div>
-        <p v-if="!subtitleWorkflow.alignments.length" class="category-empty-state">No alignment jobs yet. Approve an English transcript, then run WhisperX alignment.</p>
+        <div class="category-editor-heading"><div><h3>English subtitles</h3><p class="muted">Review the timed SRT, edit if needed, then approve an immutable version.</p></div></div>
+        <p v-if="!subtitleWorkflow.alignments.length" class="category-empty-state">No timing jobs yet. Approve an English transcript, then run the selected subtitle processing method.</p>
         <article v-for="alignment in subtitleWorkflow.alignments" :key="alignment.operation_id" class="subtitle-operation-row">
           <div class="subtitle-operation-heading"><strong>Alignment #{{ alignment.operation_id }}</strong><span class="category-state" :class="alignment.approved ? 'available' : alignment.status === 'failed' ? 'unavailable' : 'archived'">{{ alignment.approved ? 'Approved' : alignment.status === 'succeeded' ? 'Pending subtitle review' : alignment.status }}</span></div>
+          <small>Method: {{ processingMethodLabel(alignment.processing_method) }}<template v-if="alignment.effective_method && alignment.effective_method !== alignment.processing_method"> · Used {{ processingMethodLabel(alignment.effective_method) }}</template></small>
+          <small v-if="alignment.fallback_reason" class="subtitle-recovery-note">Fallback: {{ alignment.fallback_reason }}</small>
+          <small v-if="alignment.total_words !== null && alignment.total_words !== undefined"><template v-if="alignment.audio_duration_seconds">{{ Number(alignment.audio_duration_seconds).toFixed(1) }}s audio · </template>Timed {{ alignment.successfully_aligned_words ?? 0 }} of {{ alignment.total_words }} words · {{ alignment.missing_or_unreliable_words ?? 0 }} missing or unreliable<template v-if="alignment.low_score_word_count"> · {{ alignment.low_score_word_count }} low-score</template><template v-if="alignment.overlap_duplicate_word_count"> · {{ alignment.overlap_duplicate_word_count }} overlapping duplicate(s) omitted</template><template v-if="alignment.api_usage?.audio_minutes"> · API audio {{ Number(alignment.api_usage.audio_minutes * 60).toFixed(1) }}s</template><template v-if="alignment.request_duration_ms"> · Request {{ (alignment.request_duration_ms / 1000).toFixed(1) }}s</template><template v-if="alignment.timeline_offset_seconds"> · Lesson offset {{ Number(alignment.timeline_offset_seconds).toFixed(3) }}s</template></small>
+          <details v-if="alignment.missing_words?.length || alignment.added_api_words?.length || alignment.ambiguous_words?.length" class="subtitle-operation-diagnostics">
+            <summary>Transcript timing differences</summary>
+            <small v-for="(item, index) in alignment.missing_words || []" :key="`missing-${index}`">Missing timing · {{ item.word }} (token {{ item.source_token_index + 1 }})</small>
+            <small v-for="(item, index) in alignment.added_api_words || []" :key="`added-${index}`">Additional API word · {{ item.word }} (API word {{ item.api_word_index + 1 }})</small>
+            <small v-for="(item, index) in alignment.ambiguous_words || []" :key="`ambiguous-${index}`">Ambiguous match · {{ item.word }} (token {{ item.source_token_index + 1 }})</small>
+          </details>
           <p v-if="alignment.error_message" class="student-error">{{ alignment.error_message }}</p>
           <small v-if="alignment.status === 'queued'">Waiting for the {{ alignment.queue?.queue || 'WhisperX alignment' }} queue worker.</small>
-          <small v-if="alignment.status === 'processing'">{{ alignment.transcript_chunk_number && alignment.transcript_chunk_count ? `Aligning transcript chunk ${alignment.transcript_chunk_number} of ${alignment.transcript_chunk_count}` : 'Aligning the transcript with WhisperX' }} · process status is checked against its saved identity.</small>
+          <small v-if="alignment.status === 'processing'">{{ alignment.transcript_chunk_number && alignment.transcript_chunk_count ? `Processing transcript chunk ${alignment.transcript_chunk_number} of ${alignment.transcript_chunk_count}` : 'Processing the approved transcript' }} · process status is checked against its saved identity.</small>
           <small v-if="alignment.recovered_artifact" class="subtitle-recovery-note">Recovered alignment draft. Historical audio input association is unverified; timestamps are relative to the supplied chunk with no original lesson offset applied.</small>
           <template v-if="alignment.status === 'succeeded'">
             <div v-if="alignmentCueDrafts[alignment.operation_id]?.length" class="subtitle-section-editor">
