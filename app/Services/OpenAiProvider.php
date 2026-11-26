@@ -6,6 +6,7 @@ use App\Support\AiProvider;
 use App\Support\AiProviderException;
 use App\Support\SubtitleCueTranslationProvider;
 use Illuminate\Http\Client\Response;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
 
@@ -78,16 +79,35 @@ class OpenAiProvider implements AiProvider, SubtitleCueTranslationProvider
     }
 
     /** Transcribe a prepared English chunk with Whisper-1 word timestamps. */
-    public function transcribeWordTimestamps(array $configuration, array $credentials, string $audioPath, string $idempotencyKey): array
+    public function transcribeWordTimestamps(
+        array $configuration,
+        array $credentials,
+        string $audioPath,
+        string $idempotencyKey,
+        ?float $audioDurationSeconds = null,
+        ?int $jobAttempt = null,
+    ): array
     {
         if (!is_file($audioPath) || !is_readable($audioPath)) {
             throw new RuntimeException('The prepared audio file is unavailable for Whisper-1 timing.');
         }
         $handle = fopen($audioPath, 'rb');
         if (!is_resource($handle)) throw new RuntimeException('The prepared audio file could not be opened.');
+        $requestStartedAt = now()->toIso8601String();
+        $requestStartedClock = hrtime(true);
+        $fileSizeBytes = filesize($audioPath);
+        $diagnostics = [
+            'audio_file_size_bytes' => $fileSizeBytes === false ? null : $fileSizeBytes,
+            'audio_duration_seconds' => $audioDurationSeconds !== null && is_finite($audioDurationSeconds) ? $audioDurationSeconds : null,
+            'request_started_at' => $requestStartedAt,
+            'job_attempt' => $jobAttempt,
+        ];
         try {
-            $started = hrtime(true);
-            $response = $this->request($credentials)
+            $response = $this->request(
+                $credentials,
+                max(1, (int) config('openai.whisper_http_timeout', 1800)),
+                max(1, (int) config('openai.whisper_connect_timeout', 30)),
+            )
                 ->withHeaders($this->idempotencyHeaders($idempotencyKey))
                 ->attach('file', $handle, basename($audioPath))
                 ->post($this->url($configuration, '/audio/transcriptions'), [
@@ -95,9 +115,34 @@ class OpenAiProvider implements AiProvider, SubtitleCueTranslationProvider
                     'response_format' => 'verbose_json',
                     'timestamp_granularities[]' => 'word',
                 ]);
-            $requestDurationMs = (int) round((hrtime(true) - $started) / 1_000_000);
+            $requestDurationMs = (int) round((hrtime(true) - $requestStartedClock) / 1_000_000);
+        } catch (\Throwable $exception) {
+            $requestDurationMs = (int) round((hrtime(true) - $requestStartedClock) / 1_000_000);
+            Log::warning('OpenAI Whisper-1 timing request failed.', $diagnostics + [
+                'request_ended_at' => now()->toIso8601String(),
+                'request_duration_ms' => $requestDurationMs,
+                'http_status' => null,
+                'openai_request_id' => null,
+                'curl_error_code' => $this->curlErrorCode($exception->getMessage()),
+                'curl_error_message' => $this->safeDiagnosticMessage($exception->getMessage()),
+                'exception_class' => $exception::class,
+            ]);
+            throw $exception;
         } finally {
             fclose($handle);
+        }
+        $apiDuration = is_numeric($response->json('duration')) ? (float) $response->json('duration') : null;
+        $diagnostics['audio_duration_seconds'] = $apiDuration ?? $diagnostics['audio_duration_seconds'];
+        $diagnostics += [
+            'request_ended_at' => now()->toIso8601String(),
+            'request_duration_ms' => $requestDurationMs,
+            'http_status' => $response->status(),
+            'openai_request_id' => $response->header('x-request-id'),
+        ];
+        if (!$response->successful()) {
+            Log::warning('OpenAI Whisper-1 timing request returned an HTTP error.', $diagnostics);
+        } else {
+            Log::info('OpenAI Whisper-1 timing request completed.', $diagnostics);
         }
         $this->assertSuccessful($response);
         $body = $response->json();
@@ -153,11 +198,29 @@ class OpenAiProvider implements AiProvider, SubtitleCueTranslationProvider
         return ['cues' => $translated['cues'], 'usage' => $this->usage($body), 'request_reference' => $response->header('x-request-id')];
     }
 
-    private function request(array $credentials)
+    private function request(array $credentials, int $timeoutSeconds = 90, int $connectTimeoutSeconds = 10)
     {
         $key = $credentials['api_key'] ?? null;
         if (!is_string($key) || trim($key) === '') throw new RuntimeException('The provider credential is not configured.');
-        return Http::acceptJson()->withToken($key)->timeout(90)->connectTimeout(10);
+        return Http::acceptJson()->withToken($key)->timeout($timeoutSeconds)->connectTimeout($connectTimeoutSeconds);
+    }
+
+    private function curlErrorCode(string $message): ?int
+    {
+        return preg_match('/cURL error\s+(\d+)/i', $message, $matches) === 1 ? (int) $matches[1] : null;
+    }
+
+    private function safeDiagnosticMessage(string $message): string
+    {
+        if (preg_match('/cURL error\s+\d+\s*:\s*([^\r\n]+)/i', $message, $matches) !== 1) {
+            return 'Request failed before a response was received.';
+        }
+
+        $message = $matches[1];
+        $message = preg_replace('/Authorization\s*:\s*[^\s,;]+(?:\s+[^\s,;]+)?/i', 'Authorization: [redacted]', $message) ?? '';
+        $message = preg_replace('/Bearer\s+[^\s,;]+/i', 'Bearer [redacted]', $message) ?? '';
+        $message = preg_replace('/\bsk-[A-Za-z0-9_-]+/i', '[redacted-api-key]', $message) ?? '';
+        return mb_substr($message, 0, 500);
     }
 
     private function url(array $configuration, string $path): string

@@ -98,7 +98,9 @@ class RunWhisperxAlignment implements ShouldQueue
                     return;
                 }
                 $artifacts = $whisper1->process($usage, (string) ($payload['audio_relative_path'] ?? ''), $transcriptText,
-                    (float) ($usage->timeline_offset_seconds ?? 0), $overlapContext);
+                    (float) ($usage->timeline_offset_seconds ?? 0), $overlapContext,
+                    is_numeric($transcript->audio_minutes) ? (float) $transcript->audio_minutes * 60 : null,
+                    $this->attempts());
             } elseif ($processingMethod === SubtitleProcessingMethod::BOUNDED) {
                 try {
                     $segments = is_array($transcript->result['segments'] ?? null) ? $transcript->result['segments'] : [];
