@@ -93,18 +93,33 @@ class AiOperationService
             ]]);
     }
 
-    public function queueTranscription(string $audioPath, string $idempotencyKey, ?int $lessonId = null, string $language = 'en', float $timelineOffsetSeconds = 0, ?string $queueName = 'ai-transcription-test'): array
+    public function queueTranscription(string $audioPath, string $idempotencyKey, ?int $lessonId = null, string $language = 'en', float $timelineOffsetSeconds = 0, ?string $queueName = 'ai-transcription-test', ?string $subtitleProcessingMethod = null): array
     {
         $assigned = $this->assigned('transcription');
+        $subtitleProcessingMethod ??= SubtitleProcessingMethod::current();
+        if ($subtitleProcessingMethod === SubtitleProcessingMethod::OPENAI_WHISPER1
+            && ($assigned['provider']->key() !== 'openai' || $assigned['integration']->model !== 'whisper-1')) {
+            throw new RuntimeException('Select the OpenAI Whisper-1 transcription assignment before using combined transcription and word timestamps.');
+        }
+        $fingerprintData = ['service' => 'transcription', 'lesson_id' => $lessonId, 'language' => $language,
+            'audio_sha256' => is_file($audioPath) ? hash_file('sha256', $audioPath) : null, 'timeline_offset_seconds' => $timelineOffsetSeconds];
+        if ($subtitleProcessingMethod !== SubtitleProcessingMethod::STANDARD) $fingerprintData['subtitle_processing_method'] = $subtitleProcessingMethod;
+        $combinedWhisper1 = $subtitleProcessingMethod === SubtitleProcessingMethod::OPENAI_WHISPER1;
+        $queueConnection = $combinedWhisper1 ? (string) config('whisperx.connection', 'whisperx') : null;
+        $queueName = $combinedWhisper1 ? (string) config('whisperx.queue', 'whisperx-alignment') : $queueName;
+        $jobTimeout = $combinedWhisper1
+            ? max((int) config('whisperx.job_timeout', 7500), (int) config('openai.whisper_http_timeout', 1800) + 300)
+            : null;
         return $this->enqueue($assigned, 'transcription', $lessonId, [
             'audio_path' => $audioPath,
             'prepared_audio_path' => $this->privatePreparedAudioRelativePath($audioPath),
             'language' => $language,
             'timeline_offset_seconds' => $timelineOffsetSeconds,
+            'subtitle_processing_method' => $subtitleProcessingMethod,
         ],
-            $idempotencyKey, $this->fingerprint(['service' => 'transcription', 'lesson_id' => $lessonId, 'language' => $language,
-                'audio_sha256' => is_file($audioPath) ? hash_file('sha256', $audioPath) : null, 'timeline_offset_seconds' => $timelineOffsetSeconds]),
-            ['timeline_offset_seconds' => $timelineOffsetSeconds], $queueName);
+            $idempotencyKey, $this->fingerprint($fingerprintData),
+            ['timeline_offset_seconds' => $timelineOffsetSeconds, 'result' => ['processing_method' => $subtitleProcessingMethod]],
+            $queueName, $queueConnection, $jobTimeout);
     }
 
     public function runQueued(int $usageId, array $payload): array
@@ -130,6 +145,8 @@ class AiOperationService
         $operation = $usage->service === 'transcription'
             ? fn (array $configuration, array $credentials, string $model): array => $provider->transcribe($configuration, [
                 'credentials' => $credentials, 'model' => $model, 'audio_path' => $payload['audio_path'], 'language' => $payload['language'] ?? 'en', 'idempotency_key' => $usage->idempotency_key,
+                'subtitle_processing_method' => $payload['subtitle_processing_method'] ?? null,
+                'job_attempt' => $payload['job_attempt'] ?? null,
             ])
             : (($payload['cue_translation'] ?? false) === true
                 ? function (array $configuration, array $credentials, string $model) use ($provider, $payload, $usage): array {
@@ -162,6 +179,7 @@ class AiOperationService
         if ($usage->service === 'transcription' && is_string($payload['prepared_audio_path'] ?? null)) {
             $result['prepared_audio_path'] = $payload['prepared_audio_path'];
             $result['language'] = (string) ($payload['language'] ?? 'en');
+            $result['processing_method'] = $payload['subtitle_processing_method'] ?? SubtitleProcessingMethod::STANDARD;
             $usage->update(['result' => $result]);
         } elseif ($usage->service === 'translation' && is_string($payload['target_language'] ?? null)) {
             $result['target_language'] = $payload['target_language'];
@@ -174,7 +192,7 @@ class AiOperationService
         return $result;
     }
 
-    private function enqueue(array $assigned, string $service, ?int $lessonId, array $input, string $idempotencyKey, string $fingerprint, array $usageAttributes = [], ?string $queueName = null): array
+    private function enqueue(array $assigned, string $service, ?int $lessonId, array $input, string $idempotencyKey, string $fingerprint, array $usageAttributes = [], ?string $queueName = null, ?string $queueConnection = null, ?int $jobTimeout = null): array
     {
         $assignment = $assigned['integration'];
         $account = $assigned['account'];
@@ -193,7 +211,8 @@ class AiOperationService
             $payload = Crypt::encryptString(json_encode(array_merge($input, [
                 'service' => $service, 'lesson_id' => $lessonId,
             ]), JSON_THROW_ON_ERROR));
-            $job = RunAiOperation::dispatch($usage->id, $payload);
+            $job = RunAiOperation::dispatch($usage->id, $payload, $jobTimeout);
+            if ($queueConnection !== null) $job->onConnection($queueConnection);
             if ($queueName !== null) $job->onQueue($queueName);
             $job->afterCommit();
         } catch (Throwable $exception) {

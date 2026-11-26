@@ -36,8 +36,18 @@ class OpenAiProvider implements AiProvider, SubtitleCueTranslationProvider
         if (!is_string($path) || !is_file($path) || !is_readable($path)) {
             throw new RuntimeException('The audio file is unavailable for transcription.');
         }
-        $handle = fopen($path, 'rb');
         $model = $input['model'];
+        if ($model === 'whisper-1' && ($input['subtitle_processing_method'] ?? null) === SubtitleProcessingMethod::OPENAI_WHISPER1) {
+            return $this->transcribeWordTimestamps(
+                $configuration,
+                $input['credentials'],
+                $path,
+                (string) ($input['idempotency_key'] ?? ''),
+                null,
+                is_numeric($input['job_attempt'] ?? null) ? (int) $input['job_attempt'] : null,
+            );
+        }
+        $handle = fopen($path, 'rb');
         $parameters = ['model' => $model];
         if ($model === 'gpt-transcribe') {
             $parameters['languages[]'] = $input['languages'] ?? ($input['language'] ?? 'en');
@@ -146,8 +156,8 @@ class OpenAiProvider implements AiProvider, SubtitleCueTranslationProvider
         }
         $this->assertSuccessful($response);
         $body = $response->json();
-        if (!is_array($body) || !is_string($body['text'] ?? null)
-            || !is_numeric($body['duration'] ?? null) || !is_array($body['words'] ?? null)) {
+        if (!is_array($body) || !is_string($body['text'] ?? null) || trim($body['text']) === ''
+            || !is_numeric($body['duration'] ?? null) || !is_array($body['words'] ?? null) || $body['words'] === []) {
             throw new AiProviderException('invalid_word_timestamps', 'Whisper-1 returned no usable verbose word-timestamp response.', $response->status());
         }
         return [

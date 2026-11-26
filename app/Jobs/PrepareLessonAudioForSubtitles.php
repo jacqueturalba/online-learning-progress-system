@@ -6,6 +6,7 @@ use App\Models\AiOperationUsage;
 use App\Models\Lesson;
 use App\Services\AiOperationService;
 use App\Services\LessonAudioPreparationService;
+use App\Services\SubtitleProcessingMethod;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -34,6 +35,8 @@ class PrepareLessonAudioForSubtitles implements ShouldQueue
         try {
             $lesson = Lesson::query()->findOrFail($usage->lesson_id);
             $result = is_array($usage->result) ? $usage->result : [];
+            $processingMethod = is_string($result['processing_method'] ?? null)
+                ? $result['processing_method'] : SubtitleProcessingMethod::current();
             $prepared = is_array($result['preparation'] ?? null) ? $result['preparation'] : null;
 
             if (!$prepared || !$this->chunksExist($prepared['chunks'] ?? null)) {
@@ -57,6 +60,7 @@ class PrepareLessonAudioForSubtitles implements ShouldQueue
                     'en',
                     (float) $chunk['offset_seconds'],
                     null,
+                    $processingMethod,
                 );
                 $prepared['transcription_operations'][$index] = [
                     'operation_id' => $queued['usage_id'],

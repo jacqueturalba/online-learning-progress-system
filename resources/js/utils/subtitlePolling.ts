@@ -26,7 +26,7 @@ export function subtitleWorkflowPollingState(workflow: Workflow) {
     shouldPoll: active,
     stalled,
     warning: stalled?.queue?.state === 'delayed'
-      ? 'The WhisperX retry is delayed by its backoff. Automatic polling is paused; refresh status after the retry time.'
+      ? 'The subtitle processing retry is delayed by its backoff. Automatic polling is paused; refresh status after the retry time.'
       : stalled?.queue?.worker_command
         ? `No worker progress has been detected for ${stalled.queue.waiting_seconds ?? 60} seconds (${stalled.queue.state ?? 'stalled'}). The ${stalled.queue.queue ?? 'queued'} queue may not be running. Check the worker: ${stalled.queue.worker_command}`
         : null,

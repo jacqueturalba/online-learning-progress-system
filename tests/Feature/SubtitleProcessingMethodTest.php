@@ -123,116 +123,17 @@ it('falls back to standard WhisperX when bounded anchors are unavailable and rec
         ->and($usage->result['fallback_reason'])->toContain('fallback is required');
 });
 
-it('snapshots the selected Whisper-1 method and never invokes WhisperX for that operation', function () {
+it('rejects separate Whisper-1 alignment requests and requires combined subtitle generation', function () {
     Storage::fake('local');
     [$lesson, $transcript, $audio] = subtitleMethodSample();
     $integration = AiIntegration::query()->create(['provider' => 'openai', 'label' => 'OpenAI test', 'endpoint' => null, 'credentials' => ['api_key' => 'test-key'], 'is_enabled' => true]);
-    AiServiceAssignment::query()->create(['service' => 'transcription', 'ai_integration_id' => $integration->id, 'model' => 'gpt-transcribe']);
+    AiServiceAssignment::query()->create(['service' => 'transcription', 'ai_integration_id' => $integration->id, 'model' => 'whisper-1']);
     SubtitleProcessingMethod::save(SubtitleProcessingMethod::OPENAI_WHISPER1);
-    config(['whisperx.enabled' => false]);
     Queue::fake();
     $this->actingAs(subtitleMethodAdmin())->postJson('/api/admin/lessons/'.$lesson->id.'/whisperx-alignments', [
         'transcript_operation_id' => $transcript->id, 'audio_path' => $audio,
-    ])->assertAccepted();
-    $usage = AiOperationUsage::query()->where('service', 'whisperx_alignment')->firstOrFail();
-    expect($usage->model)->toBe('whisper-1')->and($usage->result['processing_method'])->toBe(SubtitleProcessingMethod::OPENAI_WHISPER1)->and($usage->ai_integration_id)->toBe($integration->id);
-
-    SubtitleProcessingMethod::save(SubtitleProcessingMethod::STANDARD);
-    Http::fake(['https://api.openai.com/v1/audio/transcriptions' => Http::response([
-        'text' => 'Word one.', 'duration' => 5, 'words' => [
-            ['word' => 'Word', 'start' => 1, 'end' => 1.4], ['word' => 'one.', 'start' => 1.5, 'end' => 2],
-        ], 'usage' => ['type' => 'duration', 'seconds' => 5],
-    ], 200, ['x-request-id' => 'req-test-1'])]);
-    $processes = Mockery::mock(WhisperxProcessRunner::class);
-    $processes->shouldNotReceive('run');
-    $this->app->instance(WhisperxProcessRunner::class, $processes);
-    $job = Queue::pushed(RunWhisperxAlignment::class)->first();
-    $job->handle(app(WhisperxAlignmentExecutor::class), app(OpenAiWhisper1Executor::class));
-    $usage->refresh();
-    expect($usage->status)->toBe('succeeded')
-        ->and($usage->result['processing_method'])->toBe(SubtitleProcessingMethod::OPENAI_WHISPER1)
-        ->and($usage->result['outputs']['raw_response'])->toContain('whisper1-response.json')
-        ->and($usage->result['request_reference'])->toBe('req-test-1')
-        ->and($usage->result['successfully_aligned_words'])->toBe(2)
-        ->and($usage->result['api_usage']['audio_minutes'])->toBeGreaterThan(0.08)
-        ->and($usage->result['api_usage']['audio_minutes'])->toBeLessThan(0.09);
-    $aligned = json_decode(Storage::disk('local')->get($usage->result['outputs']['aligned_json']), true, flags: JSON_THROW_ON_ERROR);
-    expect($aligned['words'][0]['start'])->toBe(43.75)->and($aligned['timeline_offset_seconds'])->toBe(42.75)->and($aligned['timestamp_scope'])->toBe('lesson');
-    Http::assertSent(function (Request $request): bool {
-        $data = $request->data();
-        $field = fn (string $name): mixed => collect($data)->first(fn (array $part): bool => ($part['name'] ?? null) === $name)['contents'] ?? null;
-        return $request->method() === 'POST'
-            && str_ends_with($request->url(), '/audio/transcriptions')
-            && $field('model') === 'whisper-1'
-            && $field('response_format') === 'verbose_json'
-            && $field('timestamp_granularities[]') === 'word'
-            && $request->hasFile('file');
-    });
-});
-
-it('fails rather than succeeding when Whisper-1 returns zero-duration required words', function () {
-    Storage::fake('local');
-    [$lesson, $transcript, $audio] = subtitleMethodSample();
-    $integration = AiIntegration::query()->create(['provider' => 'openai', 'label' => 'OpenAI test', 'credentials' => ['api_key' => 'test-key'], 'is_enabled' => true]);
-    AiServiceAssignment::query()->create(['service' => 'transcription', 'ai_integration_id' => $integration->id, 'model' => 'gpt-transcribe']);
-    SubtitleProcessingMethod::save(SubtitleProcessingMethod::OPENAI_WHISPER1);
-    Queue::fake();
-    $this->actingAs(subtitleMethodAdmin())->postJson('/api/admin/lessons/'.$lesson->id.'/whisperx-alignments', ['transcript_operation_id' => $transcript->id, 'audio_path' => $audio])->assertAccepted();
-    $usage = AiOperationUsage::query()->where('service', 'whisperx_alignment')->firstOrFail();
-    Http::fake(['https://api.openai.com/v1/audio/transcriptions' => Http::response(['text' => 'Word one.', 'duration' => 5, 'words' => [
-        ['word' => 'Word', 'start' => 1, 'end' => 1], ['word' => 'one.', 'start' => 1.5, 'end' => 2],
-    ]], 200)]);
-    $job = Queue::pushed(RunWhisperxAlignment::class)->first();
-    $job->handle(app(WhisperxAlignmentExecutor::class), app(OpenAiWhisper1Executor::class));
-    $usage->refresh();
-    expect($usage->status)->toBe('failed')->and($usage->error_code)->toBe('WordTimestampsIncomplete')
-        ->and($usage->result['missing_or_unreliable_words'])->toBe(1)
-        ->and(Storage::disk('local')->exists($usage->result['outputs']['raw_response']))->toBeTrue();
-});
-
-it('omits verified repeated words from overlapping Whisper-1 chunk subtitles without changing approved text', function () {
-    Storage::fake('local');
-    $category = Category::create(['name' => 'Overlap '.str()->uuid(), 'sort_order' => 1, 'is_active' => true]);
-    $lesson = Lesson::create(['category_id' => $category->id, 'title' => 'Overlap test', 'sort_order' => 1, 'duration_seconds' => 10]);
-    $previousAudio = 'ai-audio-preparation/overlap/chunk-001.mp3';
-    $currentAudio = 'ai-audio-preparation/overlap/chunk-002.mp3';
-    Storage::disk('local')->put($previousAudio, 'previous audio');
-    Storage::disk('local')->put($currentAudio, 'current audio');
-    AiOperationUsage::query()->create([
-        'service' => 'transcription', 'model' => 'gpt-transcribe', 'lesson_id' => $lesson->id,
-        'timeline_offset_seconds' => 0, 'audio_minutes' => .025, 'status' => 'succeeded',
-        'idempotency_key' => 'prep-77-chunk-1', 'request_fingerprint' => hash('sha256', 'previous'),
-        'result' => ['text' => 'we are here again.', 'transcript_review' => ['status' => 'approved', 'language' => 'en', 'approved_text' => 'we are here again.']],
-    ]);
-    $current = AiOperationUsage::query()->create([
-        'service' => 'transcription', 'model' => 'gpt-transcribe', 'lesson_id' => $lesson->id,
-        'timeline_offset_seconds' => 1, 'status' => 'succeeded', 'idempotency_key' => 'prep-77-chunk-2',
-        'request_fingerprint' => hash('sha256', 'here again go.'),
-        'result' => ['text' => 'here again go.', 'prepared_audio_path' => $currentAudio,
-            'transcript_review' => ['status' => 'approved', 'language' => 'en', 'approved_text' => 'here again go.', 'approved_sha256' => hash('sha256', 'here again go.')]],
-    ]);
-    $integration = AiIntegration::query()->create(['provider' => 'openai', 'label' => 'OpenAI overlap', 'credentials' => ['api_key' => 'test-key'], 'is_enabled' => true]);
-    AiServiceAssignment::query()->create(['service' => 'transcription', 'ai_integration_id' => $integration->id, 'model' => 'gpt-transcribe']);
-    SubtitleProcessingMethod::save(SubtitleProcessingMethod::OPENAI_WHISPER1);
-    Queue::fake();
-    $this->actingAs(subtitleMethodAdmin())->postJson('/api/admin/lessons/'.$lesson->id.'/whisperx-alignments', ['transcript_operation_id' => $current->id, 'audio_path' => $currentAudio])->assertAccepted();
-    $operation = AiOperationUsage::query()->where('service', 'whisperx_alignment')->firstOrFail();
-    Http::fake(['https://api.openai.com/v1/audio/transcriptions' => Http::response(['text' => 'here again go.', 'duration' => 2, 'words' => [
-        ['word' => 'here', 'start' => .1, 'end' => .3], ['word' => 'again', 'start' => .4, 'end' => .6], ['word' => 'go.', 'start' => .7, 'end' => .9],
-    ]], 200)]);
-    $processes = Mockery::mock(WhisperxProcessRunner::class);
-    $processes->shouldNotReceive('run');
-    $this->app->instance(WhisperxProcessRunner::class, $processes);
-    Queue::pushed(RunWhisperxAlignment::class)->first()->handle(app(WhisperxAlignmentExecutor::class), app(OpenAiWhisper1Executor::class));
-    $operation->refresh();
-    $aligned = json_decode(Storage::disk('local')->get($operation->result['outputs']['aligned_json']), true, flags: JSON_THROW_ON_ERROR);
-    $srt = Storage::disk('local')->get($operation->result['outputs']['srt']);
-    expect($operation->status)->toBe('succeeded')
-        ->and($operation->result['overlap_duplicate_word_count'])->toBe(2)
-        ->and($operation->result['successfully_aligned_words'])->toBe(3)
-        ->and($aligned['words'][0]['text'])->toBe('here')
-        ->and($aligned['words'][0]['status'])->toBe('overlap_duplicate')
-        ->and($aligned['words'][0]['start'])->toBe(1.1)
-        ->and($srt)->toContain('go.')
-        ->and($srt)->not->toContain('here again');
+    ])->assertUnprocessable()->assertJsonValidationErrors('alignment');
+    expect(AiOperationUsage::query()->where('service', 'whisperx_alignment')->count())->toBe(0);
+    Queue::assertNotPushed(RunWhisperxAlignment::class);
+    Http::assertNothingSent();
 });

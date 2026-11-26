@@ -1,7 +1,8 @@
 <?php
 
 $whisperxProcessTimeout = max(60, (int) env('WHISPERX_PROCESS_TIMEOUT', env('WHISPERX_TIMEOUT', 7200)));
-$whisperxJobTimeout = max($whisperxProcessTimeout + 300, (int) env('WHISPERX_JOB_TIMEOUT', 7500));
+$openaiWhisperJobTimeout = max(60, (int) env('OPENAI_WHISPER_HTTP_TIMEOUT', 1800) + 300);
+$whisperxJobTimeout = max($whisperxProcessTimeout + 300, (int) env('WHISPERX_JOB_TIMEOUT', 7500), $openaiWhisperJobTimeout);
 $whisperxWorkerTimeout = max($whisperxJobTimeout, (int) env('WHISPERX_WORKER_TIMEOUT', 7500));
 
 return [

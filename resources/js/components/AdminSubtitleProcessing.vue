@@ -36,7 +36,7 @@ onMounted(() => void load());
 
 <template>
   <section class="subtitle-method-settings" aria-labelledby="subtitle-method-title">
-    <header><p class="eyebrow">SUBTITLES</p><h2 id="subtitle-method-title">Subtitle processing method</h2><p>Choose how new approved English transcripts receive timing. Existing queued and historical operations keep their recorded method.</p></header>
+    <header><p class="eyebrow">SUBTITLES</p><h2 id="subtitle-method-title">Subtitle processing method</h2><p>Choose how new English subtitles are generated. Whisper-1 returns the transcript and word timestamps in one request per prepared audio chunk. Existing queued and historical operations keep their recorded method.</p></header>
     <p v-if="error" class="student-error" role="alert">{{ error }}</p><p v-if="notice" class="student-success" role="status">{{ notice }}</p>
     <form @submit.prevent="save">
       <label v-for="method in methodIds" :key="method" class="method-choice">
