@@ -20,6 +20,147 @@ class WhisperxAlignmentExecutor
         return $hash;
     }
 
+    public function preparedAudioPath(string $relativePath): string
+    {
+        return $this->resolvePreparedAudio($relativePath);
+    }
+
+    /** Run the separate bounded-window runner with timestamp anchors supplied by the source transcript. */
+    public function alignBounded(int $lessonId, int $operationId, string $audioRelativePath, string $transcript, array $sourceSegments, float $timelineOffsetSeconds, ?callable $onHeartbeat = null): array
+    {
+        $audioPath = $this->resolvePreparedAudio($audioRelativePath);
+        if (trim($transcript) === '') throw new WhisperxAlignmentException('TranscriptUnavailable', 'The approved transcript is empty.');
+        if (!is_finite($timelineOffsetSeconds) || $timelineOffsetSeconds < 0) throw new WhisperxAlignmentException('InvalidTimelineOffset', 'The transcript has an invalid lesson timeline offset.');
+        try { $plan = app(BoundedWindowPlanner::class)->plan($transcript, $sourceSegments); }
+        catch (\Throwable $exception) { throw new WhisperxAlignmentException('BoundedAnchorsUnavailable', 'Timestamped transcript segments cannot be reconciled safely; standard WhisperX fallback is required.', $exception); }
+
+        $disk = Storage::disk('local');
+        $directory = "whisperx-alignments/{$lessonId}/{$operationId}";
+        $disk->makeDirectory($directory);
+        $transcriptPath = $directory.'/input-transcript.txt';
+        $mapPath = $directory.'/window-map.json';
+        $paths = array_map(fn (string $file): string => $directory.'/'.$file, self::OUTPUT_FILES);
+        foreach ([$transcriptPath, $mapPath, ...$paths] as $path) $disk->delete($path);
+        if (!$disk->put($transcriptPath, $transcript)
+            || !$disk->put($mapPath, json_encode($plan, JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)."\n")) {
+            throw new WhisperxAlignmentException('InputWriteFailed', 'Bounded alignment inputs could not be saved to private storage.');
+        }
+
+        $succeeded = false;
+        try {
+            $python = $this->resolvePythonBinary((string) config('whisperx.python_binary'));
+            $runner = base_path('tools/whisperx-aligner/align_bounded_windows.py');
+            if (!is_file($runner) || !is_readable($runner)) throw new WhisperxAlignmentException('RunnerUnavailable', 'The bounded WhisperX runner is unavailable.');
+            $arguments = [$python, $runner, '--audio', $audioPath, '--transcript', $disk->path($transcriptPath), '--window-map', $disk->path($mapPath),
+                '--output', $disk->path($directory), '--language', 'en', '--device', (string) config('whisperx.device', 'cpu')];
+            $exit = $this->processes->run($arguments, (int) config('whisperx.process_timeout', config('whisperx.timeout', 7200)), $onHeartbeat);
+            if ($exit !== 0) throw new WhisperxAlignmentException('BoundedWindowFailed', 'Bounded WhisperX did not complete every anchored window.');
+            foreach ($paths as $path) if (!is_file($disk->path($path)) || filesize($disk->path($path)) <= 0) throw new WhisperxAlignmentException('OutputMissing', 'Bounded WhisperX did not produce all review files.');
+            $aligned = json_decode($disk->get($paths[0]), true, flags: JSON_THROW_ON_ERROR);
+            $report = json_decode($disk->get($paths[2]), true, flags: JSON_THROW_ON_ERROR);
+            $expected = preg_split('/\s+/u', trim($transcript), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+            $actual = array_column($aligned['words'] ?? [], 'text');
+            if ($actual !== $expected || (int) ($report['total_words'] ?? -1) !== count($expected)) throw new WhisperxAlignmentException('OutputInvalid', 'Bounded alignment changed the approved transcript tokens or order.');
+            if (($report['missing_or_unreliable_words'] ?? 1) > 0 || ($report['window_errors'] ?? []) !== []
+                || ($report['timestamp_order_violations'] ?? []) !== []) {
+                throw new WhisperxAlignmentException('BoundedWindowIncomplete', 'Bounded alignment left words untimed; standard WhisperX fallback is required.');
+            }
+            $srt = $disk->get($paths[1]);
+            if (!str_contains($srt, '-->')) throw new WhisperxAlignmentException('OutputInvalid', 'Bounded WhisperX produced no timed SRT cues.');
+            $report['processing_method'] = SubtitleProcessingMethod::BOUNDED;
+            $report['effective_method'] = SubtitleProcessingMethod::BOUNDED;
+            $report['window_plan'] = ['anchor_source' => $plan['anchor_source'], 'segment_count' => $plan['segment_count'], 'window_count' => count($plan['windows'])];
+            $this->applyLessonTimelineOffset($aligned, $report, $srt, $timelineOffsetSeconds, $paths);
+            $succeeded = true;
+            return ['outputs' => ['aligned_json' => $paths[0], 'srt' => $paths[1], 'report' => $paths[2], 'window_map' => $mapPath],
+                'total_words' => (int) $report['total_words'], 'successfully_aligned_words' => (int) $report['successfully_aligned_words'],
+                'missing_or_unreliable_words' => (int) $report['missing_or_unreliable_words'], 'audio_duration_seconds' => $report['audio_duration_seconds'] ?? null,
+                'low_score_word_count' => (int) ($report['low_score_word_count'] ?? 0),
+                'timeline_offset_seconds' => $timelineOffsetSeconds, 'processing_method' => SubtitleProcessingMethod::BOUNDED,
+                'effective_method' => SubtitleProcessingMethod::BOUNDED];
+        } finally {
+            $disk->delete($transcriptPath);
+            if (!$succeeded) $disk->delete([$mapPath, ...$paths]);
+        }
+    }
+
+    /** Save Whisper-1 timings in the same review artifacts used by the WhisperX paths. */
+    public function saveWhisper1Words(int $lessonId, int $operationId, string $transcript, float $timelineOffsetSeconds, float $duration, array $mapping, string $rawResponse, array $apiUsage, ?string $requestReference, int $requestDurationMs, array $overlapInfo = []): array
+    {
+        if (!is_finite($duration) || $duration <= 0 || !is_finite($timelineOffsetSeconds) || $timelineOffsetSeconds < 0) {
+            throw new WhisperxAlignmentException('InvalidTimingResponse', 'Whisper-1 returned an invalid audio duration or timeline offset.');
+        }
+        $disk = Storage::disk('local');
+        $directory = "whisperx-alignments/{$lessonId}/{$operationId}";
+        $disk->makeDirectory($directory);
+        $paths = array_map(fn (string $file): string => $directory.'/'.$file, self::OUTPUT_FILES);
+        $rawPath = $directory.'/whisper1-response.json';
+        $words = $mapping['words'];
+        $aligned = ['language' => 'en', 'audio_duration_seconds' => round($duration, 3), 'words' => $words];
+        [$srt, $omitted] = $this->makeSrt($words);
+        $report = [
+            'processing_method' => SubtitleProcessingMethod::OPENAI_WHISPER1,
+            'effective_method' => SubtitleProcessingMethod::OPENAI_WHISPER1,
+            'model_used' => 'whisper-1', 'audio_duration_seconds' => round($duration, 3),
+            'request_duration_ms' => $requestDurationMs, 'api_usage' => $apiUsage,
+            'request_reference' => $requestReference, 'total_words' => $mapping['total_words'],
+            'api_word_count' => $mapping['api_word_count'], 'successfully_aligned_words' => $mapping['successfully_aligned_words'],
+            'missing_or_unreliable_words' => $mapping['missing_or_unreliable_words'],
+            'missing_words' => $mapping['missing_words'], 'added_api_words' => $mapping['added_api_words'],
+            'ambiguous_words' => $mapping['ambiguous_words'], 'omitted_srt_words' => $omitted,
+            'timestamp_order_violations' => $mapping['timestamp_order_violations'],
+            'timestamps_ordered' => $mapping['timestamps_ordered'],
+            'timestamps_complete' => $mapping['missing_or_unreliable_words'] === 0 && $mapping['added_api_words'] === [] && $mapping['ambiguous_words'] === [],
+            'overlap_duplicate_word_count' => (int) ($overlapInfo['duplicate_word_count'] ?? 0),
+            'chunk_overlap' => $overlapInfo,
+            'warnings' => isset($overlapInfo['warning']) ? [$overlapInfo['warning']] : [],
+            'errors' => [], 'timeline' => 'Relative to the supplied audio chunk before Laravel offset application.',
+        ];
+        if (!$disk->put($paths[0], json_encode($aligned, JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)."\n")
+            || !$disk->put($paths[1], $srt) || !$disk->put($paths[2], json_encode($report, JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)."\n")
+            || !$disk->put($rawPath, $rawResponse)) {
+            throw new WhisperxAlignmentException('OutputWriteFailed', 'Whisper-1 review artifacts could not be saved to private storage.');
+        }
+        $this->applyLessonTimelineOffset($aligned, $report, $srt, $timelineOffsetSeconds, $paths);
+        return ['outputs' => ['aligned_json' => $paths[0], 'srt' => $paths[1], 'report' => $paths[2], 'raw_response' => $rawPath],
+            'total_words' => $mapping['total_words'], 'successfully_aligned_words' => $mapping['successfully_aligned_words'],
+            'missing_or_unreliable_words' => $mapping['missing_or_unreliable_words'], 'audio_duration_seconds' => round($duration, 3),
+            'timeline_offset_seconds' => $timelineOffsetSeconds, 'processing_method' => SubtitleProcessingMethod::OPENAI_WHISPER1,
+            'effective_method' => SubtitleProcessingMethod::OPENAI_WHISPER1, 'api_usage' => $apiUsage,
+            'api_word_count' => $mapping['api_word_count'], 'missing_words' => $mapping['missing_words'],
+            'added_api_words' => $mapping['added_api_words'], 'ambiguous_words' => $mapping['ambiguous_words'],
+            'overlap_duplicate_word_count' => (int) ($overlapInfo['duplicate_word_count'] ?? 0), 'chunk_overlap' => $overlapInfo,
+            'low_score_word_count' => 0,
+            'request_reference' => $requestReference,
+            'timestamps_complete' => $mapping['missing_or_unreliable_words'] === 0 && $mapping['added_api_words'] === [] && $mapping['ambiguous_words'] === []];
+    }
+
+    private function makeSrt(array $words): array
+    {
+        $cues = []; $group = []; $length = 0; $omitted = 0;
+        $flush = function () use (&$cues, &$group, &$length, &$omitted): void {
+            if ($group === []) return;
+            $visible = array_values(array_filter($group, fn (array $word): bool => ($word['status'] ?? null) !== 'overlap_duplicate'));
+            if ($visible === []) { $omitted += count($group); $group = []; $length = 0; return; }
+            $timed = array_values(array_filter($visible, fn (array $word): bool => is_numeric($word['start'] ?? null) && is_numeric($word['end'] ?? null) && $word['end'] > $word['start']));
+            if ($timed) {
+                $start = min(array_column($timed, 'start')); $end = max(array_column($timed, 'end'));
+                $cues[] = (count($cues) + 1)."\n".$this->formatSrtTimestamp($start).' --> '.$this->formatSrtTimestamp($end)."\n".implode(' ', array_column($visible, 'text'))."\n";
+            } else $omitted += count($group);
+            $group = []; $length = 0;
+        };
+        $previousEnd = null;
+        foreach ($words as $word) {
+            $token = (string) ($word['text'] ?? ''); $start = $word['start'] ?? null;
+            $gap = is_numeric($start) && $previousEnd !== null && (float) $start - $previousEnd > 1.25;
+            if ($group && ($length + mb_strlen($token) + 1 > 42 || $gap)) $flush();
+            $group[] = $word; $length += mb_strlen($token) + 1;
+            if (is_numeric($word['end'] ?? null)) $previousEnd = (float) $word['end'];
+        }
+        $flush();
+        return [implode("\n", $cues), $omitted];
+    }
+
     public function align(int $lessonId, int $operationId, string $audioRelativePath, string $transcript, float $timelineOffsetSeconds, ?callable $onHeartbeat = null): array
     {
         $audioPath = $this->resolvePreparedAudio($audioRelativePath);
@@ -94,6 +235,7 @@ class WhisperxAlignmentExecutor
                 'total_words' => (int) $report['total_words'],
                 'successfully_aligned_words' => (int) ($report['successfully_aligned_words'] ?? 0),
                 'missing_or_unreliable_words' => (int) ($report['missing_or_unreliable_words'] ?? 0),
+                'low_score_word_count' => count(array_filter($aligned['words'] ?? [], fn ($word): bool => is_array($word) && ($word['status'] ?? null) === 'review_low_score')),
                 'audio_duration_seconds' => $report['audio_duration_seconds'] ?? null,
                 'timeline_offset_seconds' => $timelineOffsetSeconds,
             ];

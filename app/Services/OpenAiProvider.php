@@ -77,6 +77,45 @@ class OpenAiProvider implements AiProvider, SubtitleCueTranslationProvider
         ];
     }
 
+    /** Transcribe a prepared English chunk with Whisper-1 word timestamps. */
+    public function transcribeWordTimestamps(array $configuration, array $credentials, string $audioPath, string $idempotencyKey): array
+    {
+        if (!is_file($audioPath) || !is_readable($audioPath)) {
+            throw new RuntimeException('The prepared audio file is unavailable for Whisper-1 timing.');
+        }
+        $handle = fopen($audioPath, 'rb');
+        if (!is_resource($handle)) throw new RuntimeException('The prepared audio file could not be opened.');
+        try {
+            $started = hrtime(true);
+            $response = $this->request($credentials)
+                ->withHeaders($this->idempotencyHeaders($idempotencyKey))
+                ->attach('file', $handle, basename($audioPath))
+                ->post($this->url($configuration, '/audio/transcriptions'), [
+                    'model' => 'whisper-1',
+                    'response_format' => 'verbose_json',
+                    'timestamp_granularities[]' => 'word',
+                ]);
+            $requestDurationMs = (int) round((hrtime(true) - $started) / 1_000_000);
+        } finally {
+            fclose($handle);
+        }
+        $this->assertSuccessful($response);
+        $body = $response->json();
+        if (!is_array($body) || !is_string($body['text'] ?? null)
+            || !is_numeric($body['duration'] ?? null) || !is_array($body['words'] ?? null)) {
+            throw new AiProviderException('invalid_word_timestamps', 'Whisper-1 returned no usable verbose word-timestamp response.', $response->status());
+        }
+        return [
+            'text' => $body['text'],
+            'duration_seconds' => (float) $body['duration'],
+            'words' => $body['words'],
+            'raw_response' => $response->body(),
+            'request_duration_ms' => $requestDurationMs,
+            'usage' => $this->usage($body),
+            'request_reference' => $response->header('x-request-id'),
+        ];
+    }
+
     public function translate(array $configuration, array $input): array
     {
         $response = $this->request($input['credentials'])->withHeaders($this->idempotencyHeaders($input['idempotency_key'] ?? null))->post($this->url($configuration, '/chat/completions'), [

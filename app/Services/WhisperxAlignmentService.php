@@ -20,6 +20,7 @@ class WhisperxAlignmentService
     public function __construct(
         private readonly WhisperxAlignmentExecutor $executor,
         private readonly WhisperxAlignmentReconciler $reconciler,
+        private readonly AiOperationService $aiOperations,
     ) {}
 
     public function transcriptVersion(Lesson $lesson, int $operationId): AiOperationUsage
@@ -94,7 +95,10 @@ class WhisperxAlignmentService
 
     public function queueAlignment(Lesson $lesson, int $transcriptOperationId, ?string $audioRelativePath, int $adminId): array
     {
-        if (!config('whisperx.enabled')) throw new RuntimeException('WhisperX alignment is disabled.');
+        $processingMethod = SubtitleProcessingMethod::current();
+        if ($processingMethod !== SubtitleProcessingMethod::OPENAI_WHISPER1 && !config('whisperx.enabled')) {
+            throw new RuntimeException('WhisperX alignment is disabled.');
+        }
 
         $transcript = $this->transcriptVersion($lesson, $transcriptOperationId);
         $review = $transcript->result['transcript_review'] ?? null;
@@ -107,7 +111,18 @@ class WhisperxAlignmentService
         $transcriptText = $this->approvedTranscriptText($transcript);
         $transcriptHash = hash('sha256', $transcriptText);
         $offset = (float) ($transcript->timeline_offset_seconds ?? 0);
-        $fingerprint = hash('sha256', json_encode([
+        $integration = null;
+        $model = match ($processingMethod) {
+            SubtitleProcessingMethod::OPENAI_WHISPER1 => 'whisper-1',
+            SubtitleProcessingMethod::BOUNDED => 'whisperx-3.8.6/WAV2VEC2_ASR_BASE_960H/bounded',
+            default => 'whisperx-3.8.6/WAV2VEC2_ASR_BASE_960H',
+        };
+        if ($processingMethod === SubtitleProcessingMethod::OPENAI_WHISPER1) {
+            $assigned = $this->aiOperations->assigned('transcription');
+            if ($assigned['provider']->key() !== 'openai') throw new RuntimeException('Whisper-1 timing requires an enabled OpenAI transcription integration.');
+            $integration = $assigned['account'];
+        }
+        $fingerprintData = [
             'service' => self::ALIGNMENT_SERVICE,
             'lesson_id' => $lesson->id,
             'transcript_operation_id' => $transcript->id,
@@ -115,15 +130,27 @@ class WhisperxAlignmentService
             'audio_sha256' => $audioHash,
             'timeline_offset_seconds' => $offset,
             'device' => config('whisperx.device'),
-            'script_sha256' => is_file((string) config('whisperx.script_path')) ? hash_file('sha256', (string) config('whisperx.script_path')) : null,
-        ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE));
-        $key = 'whisperx-'.$lesson->id.'-'.$transcript->id.'-'.substr($transcriptHash, 0, 20).'-'.substr($audioHash, 0, 20);
+            'script_sha256' => match ($processingMethod) {
+                SubtitleProcessingMethod::OPENAI_WHISPER1 => null,
+                SubtitleProcessingMethod::BOUNDED => is_file(base_path('tools/whisperx-aligner/align_bounded_windows.py'))
+                    ? hash_file('sha256', base_path('tools/whisperx-aligner/align_bounded_windows.py')) : null,
+                default => is_file((string) config('whisperx.script_path')) ? hash_file('sha256', (string) config('whisperx.script_path')) : null,
+            },
+        ];
+        if ($processingMethod !== SubtitleProcessingMethod::STANDARD) {
+            $fingerprintData['processing_method'] = $processingMethod;
+            $fingerprintData['openai_integration_id'] = $integration?->id;
+        }
+        $fingerprint = hash('sha256', json_encode($fingerprintData, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE));
+        $key = $processingMethod === SubtitleProcessingMethod::STANDARD
+            ? 'whisperx-'.$lesson->id.'-'.$transcript->id.'-'.substr($transcriptHash, 0, 20).'-'.substr($audioHash, 0, 20)
+            : 'subtitle-'.$processingMethod.'-'.$lesson->id.'-'.$transcript->id.'-'.substr($transcriptHash, 0, 20).'-'.substr($audioHash, 0, 20);
 
         try {
             $usage = AiOperationUsage::query()->firstOrCreate(['idempotency_key' => $key], [
-                'ai_integration_id' => null,
+                'ai_integration_id' => $integration?->id,
                 'service' => self::ALIGNMENT_SERVICE,
-                'model' => 'whisperx-3.8.6/WAV2VEC2_ASR_BASE_960H',
+                'model' => $model,
                 'lesson_id' => $lesson->id,
                 'timeline_offset_seconds' => $offset,
                 'status' => 'queued',
@@ -131,6 +158,8 @@ class WhisperxAlignmentService
                 'request_fingerprint' => $fingerprint,
                 'result' => [
                     'transcript_operation_id' => $transcript->id,
+                    'processing_method' => $processingMethod,
+                    'effective_method' => $processingMethod,
                     'transcript_sha256' => $transcriptHash,
                     'audio_sha256' => $audioHash,
                     'requested_by' => $adminId,
@@ -220,15 +249,27 @@ class WhisperxAlignmentService
             'lesson_id' => $usage->lesson_id,
             'transcript_operation_id' => $result['transcript_operation_id'] ?? null,
             'status' => $usage->status,
+            'timeline_offset_seconds' => $usage->timeline_offset_seconds !== null ? (float) $usage->timeline_offset_seconds : 0.0,
             'approval_status' => $result['approval_status'] ?? null,
             'processing_started_at' => $result['processing_started_at'] ?? null,
             'heartbeat_at' => $result['heartbeat_at'] ?? null,
             'processing_completed_at' => $result['processing_completed_at'] ?? null,
+            'processing_method' => $result['processing_method'] ?? SubtitleProcessingMethod::STANDARD,
+            'effective_method' => $result['effective_method'] ?? ($result['processing_method'] ?? SubtitleProcessingMethod::STANDARD),
+            'fallback_reason' => $result['fallback_reason'] ?? null,
             'error_code' => $usage->error_code,
             'error_message' => $usage->error_message,
             'total_words' => $result['total_words'] ?? null,
             'successfully_aligned_words' => $result['successfully_aligned_words'] ?? null,
             'missing_or_unreliable_words' => $result['missing_or_unreliable_words'] ?? null,
+            'overlap_duplicate_word_count' => $result['overlap_duplicate_word_count'] ?? 0,
+            'low_score_word_count' => $result['low_score_word_count'] ?? 0,
+            'audio_duration_seconds' => $result['audio_duration_seconds'] ?? null,
+            'api_usage' => $result['api_usage'] ?? null,
+            'request_duration_ms' => $result['request_duration_ms'] ?? null,
+            'missing_words' => $result['missing_words'] ?? [],
+            'added_api_words' => $result['added_api_words'] ?? [],
+            'ambiguous_words' => $result['ambiguous_words'] ?? [],
         ];
     }
 
