@@ -101,8 +101,8 @@ class ApprovedTranscriptWordMatcher
         for ($j = 0; $j <= min($m, $band); $j++) {
             $previous[$j] = $j;
         }
+        $forwardRows = [0 => $this->packCosts($previous, $band + 1)];
         $trace[0] = str_repeat("\x02", min($m, $band) + 1);
-        $ties = [];
         for ($i = 1; $i <= $n; $i++) {
             $low = max(0, $i - $band);
             $high = min($m, $i + $band);
@@ -122,15 +122,16 @@ class ApprovedTranscriptWordMatcher
                 $best = min($costs);
                 $hasReachableCost = $best < $unreachable;
                 if (!$hasReachableCost) $best = $band + 1;
-                if ($hasReachableCost && count(array_filter($costs, fn (int $cost): bool => $cost === $best)) > 1) $ties[$i - 1] = true;
                 $direction = $costs[0] === $best ? 0 : ($costs[1] === $best ? 1 : 2);
                 $current[$j] = $best;
                 $directions .= chr($direction);
             }
             $trace[$i] = $directions;
+            $forwardRows[$i] = $this->packCosts($current, $band + 1);
             $previous = $current;
         }
-        if (($previous[$m] ?? ($band + 1)) > $band) {
+        $globalCost = $previous[$m] ?? ($band + 1);
+        if ($globalCost > $band) {
             return [[], range(0, max(-1, $n - 1)), range(0, max(-1, $m - 1)), []];
         }
 
@@ -155,25 +156,103 @@ class ApprovedTranscriptWordMatcher
                 break;
             }
         }
-        $ambiguous = [];
-        foreach (array_keys($ties) as $sourceIndex) {
-            if (isset($matches[$sourceIndex])) {
-                unset($matches[$sourceIndex]);
-                $ambiguous[] = $sourceIndex;
-            }
-        }
-        foreach ($ambiguous as $index) {
-            foreach ($source as $candidate => $key) {
-                if ($key === $source[$index] && abs($candidate - $index) <= 4 && !in_array($candidate, $ambiguous, true)) {
-                    unset($matches[$candidate]);
-                    $ambiguous[] = $candidate;
-                }
-            }
-        }
-        $ambiguous = array_values(array_unique($ambiguous));
+
+        $ambiguous = $this->ambiguousSourceMappings($source, $api, $forwardRows, $globalCost, $band);
+        foreach ($ambiguous as $index) unset($matches[$index]);
         $missing = array_values(array_diff($missing, $ambiguous));
         sort($ambiguous);
         return [$matches, $missing, $added, $ambiguous];
+    }
+
+    /** Find source tokens whose mapping differs across globally minimal edit paths. */
+    private function ambiguousSourceMappings(array $source, array $api, array $forwardRows, int $globalCost, int $band): array
+    {
+        $n = count($source);
+        $m = count($api);
+        $cap = $band + 1;
+        $format = $this->costPackFormat($cap);
+        $bytes = match ($format) { 'C' => 1, 'n' => 2, 'N' => 4, default => 8 };
+        $ambiguous = [];
+        $backNext = [];
+
+        // Compute suffix costs one row at a time. Compact forward rows keep
+        // memory proportional to the band rather than the full PHP array grid.
+        for ($i = $n; $i >= 1; $i--) {
+            $low = max(0, $i - $band);
+            $high = min($m, $i + $band);
+            $backCurrent = [];
+            for ($j = $high; $j >= $low; $j--) {
+                if ($i === $n && $j === $m) {
+                    $backCurrent[$j] = 0;
+                    continue;
+                }
+
+                $costs = [];
+                if ($i < $n) $costs[] = $this->addCost($backNext[$j] ?? null, 1, $cap);
+                if ($j < $m) $costs[] = $this->addCost($backCurrent[$j + 1] ?? null, 1, $cap);
+                if ($i < $n && $j < $m) {
+                    $costs[] = $this->addCost($backNext[$j + 1] ?? null, $source[$i] === $api[$j] ? 0 : 1, $cap);
+                }
+                $backCurrent[$j] = $costs === [] ? $cap : min($costs);
+            }
+
+            $sourceIndex = $i - 1;
+            $previousLow = max(0, $sourceIndex - $band);
+            $previousHigh = min($m, $sourceIndex + $band);
+            [$packedForward, $forwardLow] = $forwardRows[$sourceIndex];
+            $possibleApiIndexes = [];
+            $canBeUnmatched = false;
+
+            for ($j = $previousLow; $j <= $previousHigh; $j++) {
+                $prefix = $this->unpackCost($packedForward, $j - $forwardLow, $format, $bytes);
+                if ($prefix === null || $prefix >= $cap || $prefix > $globalCost) continue;
+
+                $deleteSuffix = $backCurrent[$j] ?? null;
+                if ($deleteSuffix !== null && $deleteSuffix < $cap && $prefix + 1 + $deleteSuffix === $globalCost) {
+                    $canBeUnmatched = true;
+                }
+
+                if ($j >= $m) continue;
+                $diagonalSuffix = $backCurrent[$j + 1] ?? null;
+                if ($diagonalSuffix === null || $diagonalSuffix >= $cap) continue;
+                $isMatch = $source[$sourceIndex] === $api[$j];
+                $stepCost = $isMatch ? 0 : 1;
+                if ($prefix + $stepCost + $diagonalSuffix !== $globalCost) continue;
+                if ($isMatch) $possibleApiIndexes[$j] = true;
+                else $canBeUnmatched = true;
+            }
+
+            if (count($possibleApiIndexes) > 1 || ($possibleApiIndexes !== [] && $canBeUnmatched)) {
+                $ambiguous[] = $sourceIndex;
+            }
+
+            $backNext = $backCurrent;
+        }
+
+        return $ambiguous;
+    }
+
+    /** Store a narrow DP row without the overhead of a PHP hash table per cell. */
+    private function packCosts(array $costs, int $cap): array
+    {
+        $low = $costs === [] ? 0 : array_key_first($costs);
+        $format = $this->costPackFormat($cap);
+        $values = array_map(static fn (int $cost): int => min($cost, $cap), array_values($costs));
+
+        return [pack($format.'*', ...$values), $low];
+    }
+
+    private function costPackFormat(int $cap): string
+    {
+        return $cap <= 0xFF ? 'C' : ($cap <= 0xFFFF ? 'n' : ($cap <= 0xFFFFFFFF ? 'N' : 'J'));
+    }
+
+    private function unpackCost(string $packed, int $offset, string $format, int $bytes): ?int
+    {
+        if ($offset < 0 || ($offset + 1) * $bytes > strlen($packed)) return null;
+        $value = unpack($format, substr($packed, $offset * $bytes, $bytes));
+
+        return is_array($value) && isset($value[1]) ? (int) $value[1] : null;
     }
 
     private function addCost(?int $previous, int $increment, int $unreachable): int
