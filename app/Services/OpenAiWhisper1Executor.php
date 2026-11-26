@@ -16,7 +16,7 @@ class OpenAiWhisper1Executor
         private readonly SubtitleChunkOverlapDeduplicator $overlapDeduplicator,
     ) {}
 
-    public function process(AiOperationUsage $usage, string $audioRelativePath, string $approvedTranscript, float $timelineOffsetSeconds, array $overlapContext = []): array
+    public function process(AiOperationUsage $usage, string $audioRelativePath, string $approvedTranscript, float $timelineOffsetSeconds, array $overlapContext = [], ?float $audioDurationSeconds = null, ?int $jobAttempt = null): array
     {
         $integration = AiIntegration::withTrashed()->find($usage->ai_integration_id);
         if (!$integration || $integration->provider !== 'openai' || !$integration->is_enabled || $integration->trashed()) {
@@ -31,6 +31,8 @@ class OpenAiWhisper1Executor
             $integration->credentials ?? [],
             $audioPath,
             (string) $usage->idempotency_key,
+            $audioDurationSeconds,
+            $jobAttempt,
         );
         $mapping = $this->matcher->align($approvedTranscript, $response['words'], $response['duration_seconds']);
         $overlapInfo = ['status' => 'no_previous_chunk'];
