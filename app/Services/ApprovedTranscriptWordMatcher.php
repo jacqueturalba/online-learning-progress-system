@@ -91,6 +91,11 @@ class ApprovedTranscriptWordMatcher
         $n = count($source);
         $m = count($api);
         $band = max(24, (int) ceil(max($n, $m) * 0.12));
+        // Any reachable edit distance is at most the longer sequence length;
+        // keep an unreachable value just above that range so it cannot tie a
+        // real path and can never overflow when an edit cost is added.
+        $longerSequence = max($n, $m);
+        $unreachable = $longerSequence < PHP_INT_MAX ? $longerSequence + 1 : PHP_INT_MAX;
         $trace = [];
         $previous = [];
         for ($j = 0; $j <= min($m, $band); $j++) {
@@ -110,13 +115,14 @@ class ApprovedTranscriptWordMatcher
                     continue;
                 }
                 $costs = [
-                    0 => ($previous[$j - 1] ?? PHP_INT_MAX) + ($source[$i - 1] === $api[$j - 1] ? 0 : 1),
-                    1 => ($previous[$j] ?? PHP_INT_MAX) + 1,
-                    2 => ($current[$j - 1] ?? PHP_INT_MAX) + 1,
+                    0 => $this->addCost($previous[$j - 1] ?? null, $source[$i - 1] === $api[$j - 1] ? 0 : 1, $unreachable),
+                    1 => $this->addCost($previous[$j] ?? null, 1, $unreachable),
+                    2 => $this->addCost($current[$j - 1] ?? null, 1, $unreachable),
                 ];
                 $best = min($costs);
-                if ($best >= PHP_INT_MAX) $best = $band + 1;
-                if (count(array_filter($costs, fn (int $cost): bool => $cost === $best)) > 1) $ties[$i - 1] = true;
+                $hasReachableCost = $best < $unreachable;
+                if (!$hasReachableCost) $best = $band + 1;
+                if ($hasReachableCost && count(array_filter($costs, fn (int $cost): bool => $cost === $best)) > 1) $ties[$i - 1] = true;
                 $direction = $costs[0] === $best ? 0 : ($costs[1] === $best ? 1 : 2);
                 $current[$j] = $best;
                 $directions .= chr($direction);
@@ -168,6 +174,15 @@ class ApprovedTranscriptWordMatcher
         $missing = array_values(array_diff($missing, $ambiguous));
         sort($ambiguous);
         return [$matches, $missing, $added, $ambiguous];
+    }
+
+    private function addCost(?int $previous, int $increment, int $unreachable): int
+    {
+        if ($previous === null || $previous >= $unreachable || $increment >= $unreachable - $previous) {
+            return $unreachable;
+        }
+
+        return $previous + $increment;
     }
 
     private function key(string $word): string
