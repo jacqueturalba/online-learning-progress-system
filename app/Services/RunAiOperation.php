@@ -18,16 +18,30 @@ class RunAiOperation implements ShouldQueue
 
     public int $tries = 3;
     public array $backoff = [10, 60, 180];
-    public int $timeout = 600;
+    public int $timeout;
 
-    public function __construct(public readonly int $usageId, public readonly string $encryptedPayload) {}
+    public function __construct(public readonly int $usageId, public readonly string $encryptedPayload, ?int $timeout = null)
+    {
+        $this->timeout = max(60, $timeout ?? 600);
+    }
 
-    public function handle(AiOperationService $operations): void
+    public function handle(AiOperationService $operations, Whisper1CombinedSubtitleService $combinedSubtitles): void
     {
         try {
             $payload = json_decode(Crypt::decryptString($this->encryptedPayload), true, flags: JSON_THROW_ON_ERROR);
+            $payload['job_attempt'] = $this->attempts();
             $result = $operations->runQueued($this->usageId, $payload);
-            if (!($result['already_completed'] ?? false) && !($result['already_processing'] ?? false)) {
+            $alreadyCompleted = (bool) ($result['already_completed'] ?? false);
+            $alreadyProcessing = (bool) ($result['already_processing'] ?? false);
+            if (($payload['service'] ?? null) === 'transcription'
+                && ($payload['subtitle_processing_method'] ?? null) === SubtitleProcessingMethod::OPENAI_WHISPER1) {
+                $transcription = AiOperationUsage::query()->where('service', 'transcription')->find($this->usageId);
+                if ($transcription) {
+                    $combinedSubtitles->createFromTranscript($transcription);
+                    $result = $transcription->fresh()->result ?? $result;
+                }
+            }
+            if (!$alreadyCompleted && !$alreadyProcessing) {
                 Event::dispatch(new AiOperationCompleted($this->usageId, $payload['service'], $payload['lesson_id'] ?? null, $result));
             }
         } catch (Throwable $exception) {
@@ -41,9 +55,14 @@ class RunAiOperation implements ShouldQueue
 
     public function failed(?Throwable $exception): void
     {
+        $usage = AiOperationUsage::query()->find($this->usageId);
+        $combinedWhisper1 = ($usage?->result['processing_method'] ?? null) === SubtitleProcessingMethod::OPENAI_WHISPER1;
         AiOperationUsage::query()->whereKey($this->usageId)->update([
             'status' => 'failed', 'error_code' => $exception ? class_basename($exception) : 'QueueFailed',
-            'error_message' => 'AI operation failed after retry attempts.', 'updated_at' => now(),
+            'error_message' => $combinedWhisper1
+                ? 'OpenAI Whisper-1 transcription and word timestamp generation failed after retries.'
+                : 'AI operation failed after retry attempts.',
+            'updated_at' => now(),
         ]);
     }
 }

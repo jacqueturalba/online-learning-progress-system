@@ -110,10 +110,15 @@ class WhisperxAlignmentExecutor
             'ambiguous_words' => $mapping['ambiguous_words'], 'omitted_srt_words' => $omitted,
             'timestamp_order_violations' => $mapping['timestamp_order_violations'],
             'timestamps_ordered' => $mapping['timestamps_ordered'],
-            'timestamps_complete' => $mapping['missing_or_unreliable_words'] === 0 && $mapping['added_api_words'] === [] && $mapping['ambiguous_words'] === [],
+            'timestamps_complete' => $mapping['missing_or_unreliable_words'] === 0 && $mapping['added_api_words'] === []
+                && $mapping['ambiguous_words'] === [] && ($mapping['timestamps_ordered'] ?? true) === true,
             'overlap_duplicate_word_count' => (int) ($overlapInfo['duplicate_word_count'] ?? 0),
             'chunk_overlap' => $overlapInfo,
-            'warnings' => isset($overlapInfo['warning']) ? [$overlapInfo['warning']] : [],
+            'warnings' => array_values(array_filter([
+                isset($overlapInfo['warning']) ? $overlapInfo['warning'] : null,
+                $mapping['missing_or_unreliable_words'] > 0 ? 'Some API words have missing or invalid timestamps and were omitted from timed SRT cues.' : null,
+                ($mapping['timestamps_ordered'] ?? true) !== true ? 'Whisper-1 word timestamps were out of order.' : null,
+            ])),
             'errors' => [], 'timeline' => 'Relative to the supplied audio chunk before Laravel offset application.',
         ];
         if (!$disk->put($paths[0], json_encode($aligned, JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)."\n")
@@ -125,6 +130,8 @@ class WhisperxAlignmentExecutor
         return ['outputs' => ['aligned_json' => $paths[0], 'srt' => $paths[1], 'report' => $paths[2], 'raw_response' => $rawPath],
             'total_words' => $mapping['total_words'], 'successfully_aligned_words' => $mapping['successfully_aligned_words'],
             'missing_or_unreliable_words' => $mapping['missing_or_unreliable_words'], 'audio_duration_seconds' => round($duration, 3),
+            'timestamps_ordered' => $mapping['timestamps_ordered'] ?? true,
+            'timestamp_order_violations' => $mapping['timestamp_order_violations'] ?? [],
             'timeline_offset_seconds' => $timelineOffsetSeconds, 'processing_method' => SubtitleProcessingMethod::OPENAI_WHISPER1,
             'effective_method' => SubtitleProcessingMethod::OPENAI_WHISPER1, 'api_usage' => $apiUsage,
             'api_word_count' => $mapping['api_word_count'], 'missing_words' => $mapping['missing_words'],
@@ -132,7 +139,8 @@ class WhisperxAlignmentExecutor
             'overlap_duplicate_word_count' => (int) ($overlapInfo['duplicate_word_count'] ?? 0), 'chunk_overlap' => $overlapInfo,
             'low_score_word_count' => 0,
             'request_reference' => $requestReference,
-            'timestamps_complete' => $mapping['missing_or_unreliable_words'] === 0 && $mapping['added_api_words'] === [] && $mapping['ambiguous_words'] === []];
+            'timestamps_complete' => $mapping['missing_or_unreliable_words'] === 0 && $mapping['added_api_words'] === []
+                && $mapping['ambiguous_words'] === [] && ($mapping['timestamps_ordered'] ?? true) === true];
     }
 
     private function makeSrt(array $words): array
@@ -140,13 +148,13 @@ class WhisperxAlignmentExecutor
         $cues = []; $group = []; $length = 0; $omitted = 0;
         $flush = function () use (&$cues, &$group, &$length, &$omitted): void {
             if ($group === []) return;
-            $visible = array_values(array_filter($group, fn (array $word): bool => ($word['status'] ?? null) !== 'overlap_duplicate'));
-            if ($visible === []) { $omitted += count($group); $group = []; $length = 0; return; }
-            $timed = array_values(array_filter($visible, fn (array $word): bool => is_numeric($word['start'] ?? null) && is_numeric($word['end'] ?? null) && $word['end'] > $word['start']));
-            if ($timed) {
-                $start = min(array_column($timed, 'start')); $end = max(array_column($timed, 'end'));
+            $visible = array_values(array_filter($group, fn (array $word): bool => ($word['status'] ?? null) !== 'overlap_duplicate'
+                && is_numeric($word['start'] ?? null) && is_numeric($word['end'] ?? null) && $word['end'] > $word['start']));
+            $omitted += count($group) - count($visible);
+            if ($visible !== []) {
+                $start = min(array_column($visible, 'start')); $end = max(array_column($visible, 'end'));
                 $cues[] = (count($cues) + 1)."\n".$this->formatSrtTimestamp($start).' --> '.$this->formatSrtTimestamp($end)."\n".implode(' ', array_column($visible, 'text'))."\n";
-            } else $omitted += count($group);
+            }
             $group = []; $length = 0;
         };
         $previousEnd = null;

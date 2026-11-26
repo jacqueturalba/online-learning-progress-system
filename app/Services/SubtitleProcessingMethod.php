@@ -23,8 +23,8 @@ final class SubtitleProcessingMethod
             'description' => 'Aligns smaller windows using trustworthy timestamped transcript segments; falls back to standard when anchors are unavailable.',
         ],
         self::OPENAI_WHISPER1 => [
-            'label' => 'OpenAI Whisper-1 word timestamps',
-            'description' => 'Uses Whisper-1 word timestamps, matched back to the approved English transcript.',
+            'label' => 'OpenAI Whisper-1 transcription and word timestamps',
+            'description' => 'Generates the English transcript and word timestamps together in one Whisper-1 request per prepared audio chunk.',
         ],
     ];
 

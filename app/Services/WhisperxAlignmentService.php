@@ -67,6 +67,11 @@ class WhisperxAlignmentService
 
     public function approvedTranscriptText(AiOperationUsage $operation): string
     {
+        if ($operation->status === 'succeeded'
+            && ($operation->result['transcript_source'] ?? null) === 'openai_whisper1_response') {
+            $sourceText = $operation->result['text'] ?? null;
+            if (is_string($sourceText) && trim($sourceText) !== '') return $sourceText;
+        }
         $review = $operation->result['transcript_review'] ?? null;
         if (!is_array($review) || ($review['status'] ?? null) !== 'approved' || ($review['language'] ?? null) !== 'en') {
             throw new RuntimeException('Approve this English transcript before using it.');
@@ -101,6 +106,9 @@ class WhisperxAlignmentService
         }
 
         $transcript = $this->transcriptVersion($lesson, $transcriptOperationId);
+        if ($processingMethod === SubtitleProcessingMethod::OPENAI_WHISPER1) {
+            throw new RuntimeException('Whisper-1 generates the English transcript and word timestamps together. Use Generate English Subtitles; do not queue a separate alignment request.');
+        }
         $review = $transcript->result['transcript_review'] ?? null;
         if (!is_array($review) || ($review['status'] ?? null) !== 'approved' || ($review['language'] ?? null) !== 'en') {
             throw new RuntimeException('Approve this English transcript version before queueing alignment.');
@@ -231,7 +239,8 @@ class WhisperxAlignmentService
 
     public function srtForAdmin(AiOperationUsage $usage): string
     {
-        if ($usage->service !== self::ALIGNMENT_SERVICE || $usage->status !== 'succeeded'
+        if ($usage->service !== self::ALIGNMENT_SERVICE || !in_array($usage->status, ['succeeded', 'partial'], true)
+            || ($usage->status === 'partial' && ($usage->result['review_available'] ?? false) !== true)
             || !$usage->lesson || !is_array($usage->result)
             || ($usage->result['approval_statuses']['en'] ?? null) !== 'approved') {
             throw new RuntimeException('This alignment SRT is not approved for download.');
@@ -264,6 +273,9 @@ class WhisperxAlignmentService
             'missing_or_unreliable_words' => $result['missing_or_unreliable_words'] ?? null,
             'overlap_duplicate_word_count' => $result['overlap_duplicate_word_count'] ?? 0,
             'low_score_word_count' => $result['low_score_word_count'] ?? 0,
+            'review_available' => ($result['review_available'] ?? false) === true,
+            'timestamps_complete' => $result['timestamps_complete'] ?? null,
+            'warning' => $result['warning'] ?? null,
             'audio_duration_seconds' => $result['audio_duration_seconds'] ?? null,
             'api_usage' => $result['api_usage'] ?? null,
             'request_duration_ms' => $result['request_duration_ms'] ?? null,

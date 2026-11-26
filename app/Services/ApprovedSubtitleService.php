@@ -12,7 +12,7 @@ class ApprovedSubtitleService
 {
     public function reviewSources(Lesson $lesson): array
     {
-        return AiOperationUsage::query()->where('lesson_id', $lesson->id)->where('status', 'succeeded')
+        return AiOperationUsage::query()->where('lesson_id', $lesson->id)->whereIn('status', ['succeeded', 'partial'])
             ->whereIn('service', [WhisperxAlignmentService::ALIGNMENT_SERVICE, 'translation'])
             ->orderByDesc('id')->limit(100)->get()->map(function (AiOperationUsage $operation): ?array {
                 $result = is_array($operation->result) ? $operation->result : [];
@@ -38,7 +38,7 @@ class ApprovedSubtitleService
     {
         return AiOperationUsage::query()
             ->where('lesson_id', $lesson->id)
-            ->where('status', 'succeeded')
+            ->whereIn('status', ['succeeded', 'partial'])
             ->whereIn('service', [WhisperxAlignmentService::ALIGNMENT_SERVICE, 'translation'])
             ->orderByDesc('id')->get()
             ->flatMap(function (AiOperationUsage $operation): array {
@@ -197,7 +197,7 @@ class ApprovedSubtitleService
         $currentTimestamp = -1;
 
         foreach (AiOperationUsage::query()->where('lesson_id', $lesson->id)
-            ->where('service', $service)->where('status', 'succeeded')->orderByDesc('id')->cursor() as $operation) {
+            ->where('service', $service)->whereIn('status', ['succeeded', 'partial'])->orderByDesc('id')->cursor() as $operation) {
             $result = is_array($operation->result) ? $operation->result : [];
             $approvalStatus = $result['approval_statuses'][$language]
                 ?? ($language === 'en' ? ($result['approval_status'] ?? null) : null);
@@ -231,7 +231,9 @@ class ApprovedSubtitleService
             default => null,
         };
         if (!$expectedService || (int) $operation->lesson_id !== (int) $lesson->id
-            || $operation->service !== $expectedService || $operation->status !== 'succeeded'
+            || $operation->service !== $expectedService
+            || !in_array($operation->status, ['succeeded', 'partial'], true)
+            || ($operation->status === 'partial' && ($operation->result['review_available'] ?? false) !== true)
             || !is_array($operation->result)) {
             throw new RuntimeException('A successful subtitle source for this lesson and language was not found.');
         }

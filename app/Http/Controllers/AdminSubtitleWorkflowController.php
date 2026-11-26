@@ -8,6 +8,7 @@ use App\Models\Lesson;
 use App\Services\AiOperationService;
 use App\Services\ApprovedSubtitleService;
 use App\Services\SubtitleSrtCueService;
+use App\Services\SubtitleProcessingMethod;
 use App\Services\WhisperxAlignmentService;
 use App\Services\WhisperxAlignmentReconciler;
 use Illuminate\Http\Request;
@@ -50,7 +51,7 @@ class AdminSubtitleWorkflowController extends Controller
         }
         $approvedTranscriptHashes = $alignmentsByTranscript->filter(function (AiOperationUsage $operation): bool {
             $result = is_array($operation->result) ? $operation->result : [];
-            return $operation->status === 'succeeded' && ($result['approval_statuses']['en'] ?? null) === 'approved';
+            return in_array($operation->status, ['succeeded', 'partial'], true) && ($result['approval_statuses']['en'] ?? null) === 'approved';
         })->groupBy(function (AiOperationUsage $operation): int {
             $result = is_array($operation->result) ? $operation->result : [];
             return (int) ($result['transcript_operation_id'] ?? 0);
@@ -63,13 +64,19 @@ class AdminSubtitleWorkflowController extends Controller
 
         return response()->json([
             'lesson_id' => $lesson->id,
-            'preparations' => $preparations->map(function (AiOperationUsage $operation) use ($transcriptions): array {
+            'processing_method' => $this->workflowProcessingMethod($preparations),
+            'preparations' => $preparations->map(function (AiOperationUsage $operation) use ($transcriptions, $alignmentsByTranscript): array {
                 $result = is_array($operation->result) ? $operation->result : [];
                 $preparation = $result['preparation'] ?? [];
+                $processingMethod = $result['processing_method'] ?? SubtitleProcessingMethod::STANDARD;
                 $chunks = [];
                 foreach ($preparation['chunks'] ?? [] as $index => $chunk) {
                     $transcription = $preparation['transcription_operations'][$index] ?? [];
                     $transcriptionOperation = $transcriptions->firstWhere('id', $transcription['operation_id'] ?? null);
+                    $subtitleOperation = $alignmentsByTranscript->first(function (AiOperationUsage $candidate) use ($transcriptionOperation): bool {
+                        return $transcriptionOperation !== null
+                            && (int) ($candidate->result['transcript_operation_id'] ?? 0) === (int) $transcriptionOperation->id;
+                    });
                     $chunks[] = [
                         'operation_id' => $transcription['operation_id'] ?? null,
                         'offset_seconds' => $chunk['offset_seconds'] ?? null,
@@ -77,7 +84,12 @@ class AdminSubtitleWorkflowController extends Controller
                         'status' => $transcriptionOperation?->status ?? ($transcription['status'] ?? 'queued'),
                         'error_code' => $transcriptionOperation?->error_code,
                         'error_message' => $transcriptionOperation?->error_message,
-                        'queue' => $this->queueDetails($transcriptionOperation, 'default'),
+                        'subtitle_status' => $subtitleOperation?->status,
+                        'subtitle_error_message' => $subtitleOperation?->error_message,
+                        'subtitle_warning' => $subtitleOperation?->result['warning'] ?? null,
+                        'queue' => $this->queueDetails($transcriptionOperation,
+                            $processingMethod === SubtitleProcessingMethod::OPENAI_WHISPER1 ? 'whisperx' : (string) config('queue.default'),
+                            $processingMethod === SubtitleProcessingMethod::OPENAI_WHISPER1 ? null : 600),
                     ];
                 }
                 return ['operation_id' => $operation->id, 'status' => $operation->status, 'error_code' => $operation->error_code,
@@ -91,6 +103,7 @@ class AdminSubtitleWorkflowController extends Controller
                 return [
                     'operation_id' => $operation->id,
                     'status' => $operation->status,
+                    'processing_method' => $result['processing_method'] ?? SubtitleProcessingMethod::STANDARD,
                     'text' => $result['transcript_draft']['text'] ?? $result['text'] ?? '',
                     'approved' => ($result['transcript_review']['status'] ?? null) === 'approved',
                     'approved_at' => $result['transcript_review']['approved_at'] ?? null,
@@ -101,7 +114,9 @@ class AdminSubtitleWorkflowController extends Controller
                     'audio' => is_string($preparedAudioPath) ? ($audioSourcesByChunk[$preparedAudioPath] ?? null) : null,
                     'error_code' => $operation->error_code,
                     'error_message' => $operation->error_message,
-                    'queue' => $this->queueDetails($operation, (string) config('queue.default'), 600),
+                    'queue' => $this->queueDetails($operation,
+                        ($result['processing_method'] ?? null) === SubtitleProcessingMethod::OPENAI_WHISPER1 ? 'whisperx' : (string) config('queue.default'),
+                        ($result['processing_method'] ?? null) === SubtitleProcessingMethod::OPENAI_WHISPER1 ? null : 600),
                 ];
             })->values(),
             'alignments' => $alignmentsByTranscript->map(function (AiOperationUsage $operation) use ($alignments, $reconciler, $transcriptions, $audioSourcesByChunk): array {
@@ -116,6 +131,9 @@ class AdminSubtitleWorkflowController extends Controller
                     'approved' => ($result['approval_statuses']['en'] ?? null) === 'approved',
                     'transcript_operation_id' => $result['transcript_operation_id'] ?? null,
                     'download_version_id' => $result['subtitle_versions']['en']['current_approved_version_id'] ?? null,
+                    'review_available' => ($result['review_available'] ?? false) === true,
+                    'timestamps_complete' => ($result['timestamps_complete'] ?? null),
+                    'warning' => $result['warning'] ?? null,
                     'transcript_sha256' => $result['transcript_sha256'] ?? null,
                     'transcript_chunk_number' => $audioSource['chunk_number'] ?? null,
                     'transcript_chunk_count' => $audioSource['chunk_count'] ?? null,
@@ -150,13 +168,27 @@ class AdminSubtitleWorkflowController extends Controller
         ], 200, ['Cache-Control' => 'private, no-store', 'X-Content-Type-Options' => 'nosniff']);
     }
 
+    private function workflowProcessingMethod($preparations): string
+    {
+        foreach ($preparations as $preparation) {
+            $method = $preparation->result['processing_method'] ?? null;
+            if (is_string($method) && isset(SubtitleProcessingMethod::OPTIONS[$method])) return $method;
+        }
+        return SubtitleProcessingMethod::current();
+    }
+
     public function transcribe(Lesson $lesson, AiOperationService $operations)
     {
         if (config('queue.default') === 'sync') {
             throw ValidationException::withMessages(['transcription' => 'Configure an asynchronous queue before generating a transcript.']);
         }
         try {
-            $operations->assigned('transcription');
+            $assignment = $operations->assigned('transcription');
+            $processingMethod = SubtitleProcessingMethod::current();
+            if ($processingMethod === SubtitleProcessingMethod::OPENAI_WHISPER1
+                && ($assignment['provider']->key() !== 'openai' || $assignment['integration']->model !== 'whisper-1')) {
+                throw new RuntimeException('Select the OpenAI Whisper-1 transcription assignment before generating English subtitles.');
+            }
         } catch (RuntimeException $exception) {
             throw ValidationException::withMessages(['transcription' => $exception->getMessage()]);
         }
@@ -174,15 +206,18 @@ class AdminSubtitleWorkflowController extends Controller
 
         $videoHash = hash_file('sha256', $video);
         if (!is_string($videoHash)) throw ValidationException::withMessages(['transcription' => 'The lesson video could not be fingerprinted.']);
-        $key = 'audio-prep-'.$lesson->id.'-'.substr($videoHash, 0, 32);
-        $fingerprint = hash('sha256', json_encode([
+        $key = 'audio-prep-'.$lesson->id.'-'.substr($videoHash, 0, 32)
+            .($processingMethod === SubtitleProcessingMethod::OPENAI_WHISPER1 ? '-whisper1' : '');
+        $fingerprintData = [
             'service' => 'audio_preparation', 'lesson_id' => $lesson->id, 'video_sha256' => $videoHash,
-        ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE));
+        ];
+        if ($processingMethod === SubtitleProcessingMethod::OPENAI_WHISPER1) $fingerprintData['processing_method'] = $processingMethod;
+        $fingerprint = hash('sha256', json_encode($fingerprintData, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE));
 
         $usage = AiOperationUsage::query()->firstOrCreate(['idempotency_key' => $key], [
             'service' => 'audio_preparation', 'model' => 'ffmpeg-local', 'lesson_id' => $lesson->id,
             'status' => 'queued', 'request_reference' => (string) str()->uuid(), 'request_fingerprint' => $fingerprint,
-            'result' => ['requested_by' => auth()->id(), 'video_sha256' => $videoHash],
+            'result' => ['requested_by' => auth()->id(), 'video_sha256' => $videoHash, 'processing_method' => $processingMethod],
         ]);
         if (!hash_equals((string) $usage->request_fingerprint, $fingerprint)) {
             throw ValidationException::withMessages(['transcription' => 'This audio preparation key is associated with different input.']);
@@ -284,7 +319,9 @@ class AdminSubtitleWorkflowController extends Controller
         $connection = config('queue.connections.'.$connectionName, []);
         $queueName = (string) ($connection['queue'] ?? 'default');
         $workerTimeout = $connectionName === 'whisperx' ? (int) config('whisperx.worker_timeout', 7500) : ($jobTimeout ?? 120);
-        $workerTries = $connectionName === 'whisperx' ? 2 : 3;
+        $combinedWhisper1 = $operation->service === 'transcription'
+            && (($operation->result['processing_method'] ?? null) === SubtitleProcessingMethod::OPENAI_WHISPER1);
+        $workerTries = $connectionName === 'whisperx' && !$combinedWhisper1 ? 2 : 3;
         $waitSeconds = $operation->status === 'processing' && is_array($operation->result)
             && is_string($operation->result['heartbeat_at'] ?? $operation->result['processing_started_at'] ?? null)
             ? abs((int) now()->diffInSeconds(\Illuminate\Support\Carbon::parse($operation->result['heartbeat_at'] ?? $operation->result['processing_started_at'])))
@@ -340,10 +377,11 @@ class AdminSubtitleWorkflowController extends Controller
             $alignmentId = $request->integer('source_alignment_operation_id');
             $versionId = $request->string('source_english_srt_version_id')->toString();
             $alignment = AiOperationUsage::query()->where('lesson_id', $lesson->id)
-                ->where('service', WhisperxAlignmentService::ALIGNMENT_SERVICE)->where('status', 'succeeded')->find($alignmentId);
+                ->where('service', WhisperxAlignmentService::ALIGNMENT_SERVICE)->whereIn('status', ['succeeded', 'partial'])->find($alignmentId);
             $alignmentResult = is_array($alignment?->result) ? $alignment->result : [];
             $currentVersionId = $alignmentResult['subtitle_versions']['en']['current_approved_version_id'] ?? null;
-            if (!$alignment || ($alignmentResult['approval_statuses']['en'] ?? null) !== 'approved'
+            if (!$alignment || ($alignment->status === 'partial' && ($alignmentResult['review_available'] ?? false) !== true)
+                || ($alignmentResult['approval_statuses']['en'] ?? null) !== 'approved'
                 || (int) ($alignmentResult['transcript_operation_id'] ?? 0) !== (int) $source->id
                 || ($alignmentResult['transcript_sha256'] ?? null) !== $textHash
                 || !is_string($versionId) || $versionId === '' || $versionId !== $currentVersionId) {

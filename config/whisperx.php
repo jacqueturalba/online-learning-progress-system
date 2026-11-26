@@ -1,5 +1,10 @@
 <?php
 
+$processTimeout = max(60, (int) env('WHISPERX_PROCESS_TIMEOUT', env('WHISPERX_TIMEOUT', 7200)));
+$openaiWhisperJobTimeout = max(60, (int) env('OPENAI_WHISPER_HTTP_TIMEOUT', 1800) + 300);
+$jobTimeout = max($processTimeout + 300, (int) env('WHISPERX_JOB_TIMEOUT', 7500), $openaiWhisperJobTimeout);
+$workerTimeout = max($jobTimeout, (int) env('WHISPERX_WORKER_TIMEOUT', 7500));
+
 return [
     'enabled' => (bool) env('WHISPERX_ENABLED', false),
     'python_binary' => env('WHISPERX_PYTHON_BINARY', 'python3'),
@@ -7,28 +12,10 @@ return [
     'device' => env('WHISPERX_DEVICE', 'cpu'),
     // Let Symfony stop the Python process first; Laravel then has time to catch
     // the timeout, clean partial output, and release the job for its retry.
-    'process_timeout' => max(60, (int) env('WHISPERX_PROCESS_TIMEOUT', env('WHISPERX_TIMEOUT', 7200))),
-    'job_timeout' => max(
-        max(60, (int) env('WHISPERX_PROCESS_TIMEOUT', env('WHISPERX_TIMEOUT', 7200))) + 300,
-        (int) env('WHISPERX_JOB_TIMEOUT', 7500),
-    ),
-    'worker_timeout' => max(
-        max(
-            max(60, (int) env('WHISPERX_PROCESS_TIMEOUT', env('WHISPERX_TIMEOUT', 7200))) + 300,
-            (int) env('WHISPERX_JOB_TIMEOUT', 7500),
-        ),
-        (int) env('WHISPERX_WORKER_TIMEOUT', 7500),
-    ),
-    'retry_after' => max(
-        max(
-            max(
-                max(60, (int) env('WHISPERX_PROCESS_TIMEOUT', env('WHISPERX_TIMEOUT', 7200))) + 300,
-                (int) env('WHISPERX_JOB_TIMEOUT', 7500),
-            ),
-            (int) env('WHISPERX_WORKER_TIMEOUT', 7500),
-        ) + 300,
-        (int) env('WHISPERX_RETRY_AFTER', 7800),
-    ),
+    'process_timeout' => $processTimeout,
+    'job_timeout' => $jobTimeout,
+    'worker_timeout' => $workerTimeout,
+    'retry_after' => max($workerTimeout + 300, (int) env('WHISPERX_RETRY_AFTER', 7800)),
     'connection' => 'whisperx',
     'queue' => 'whisperx-alignment',
 ];

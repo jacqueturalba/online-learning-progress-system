@@ -53,7 +53,9 @@ class AdminSubtitleController extends Controller
         $path = is_string($draftPath) && Storage::disk('local')->exists($draftPath)
             ? $draftPath
             : ($usage->result['outputs']['srt'] ?? null);
-        if ($usage->status !== 'succeeded' || !is_string($path) || !Storage::disk('local')->exists($path)) {
+        if (!in_array($usage->status, ['succeeded', 'partial'], true)
+            || ($usage->status === 'partial' && ($usage->result['review_available'] ?? false) !== true)
+            || !is_string($path) || !Storage::disk('local')->exists($path)) {
             abort(404, 'The alignment SRT preview is not available.');
         }
         $contents = Storage::disk('local')->get($path);
@@ -70,7 +72,8 @@ class AdminSubtitleController extends Controller
     {
         $data = $request->validate(['srt_text' => ['required', 'string', 'max:5000000']]);
         $usage = AiOperationUsage::query()->where('lesson_id', $lesson->id)
-            ->where('service', 'whisperx_alignment')->where('status', 'succeeded')->findOrFail($operation);
+            ->where('service', 'whisperx_alignment')->whereIn('status', ['succeeded', 'partial'])->findOrFail($operation);
+        if ($usage->status === 'partial' && ($usage->result['review_available'] ?? false) !== true) abort(404);
         $result = is_array($usage->result) ? $usage->result : [];
         $sourcePath = $result['outputs']['srt'] ?? null;
         if (!is_string($sourcePath) || !Storage::disk('local')->exists($sourcePath)) {
