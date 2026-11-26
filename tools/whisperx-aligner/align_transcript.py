@@ -16,6 +16,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+from process_metrics import average_cpu_cores, peak_working_set_mib
+
 
 SAMPLE_RATE = 16_000
 DEFAULT_FFMPEG = Path(r"C:\ffmpeg\bin\ffmpeg.exe")
@@ -132,14 +134,32 @@ def write_json(path: Path, value: Any) -> None:
 def main() -> int:
     args = parse_args()
     started = time.perf_counter()
+    cpu_started = time.process_time()
+    stage_started = started
+    stage_timings: dict[str, float | None] = {
+        "torch_import_seconds": None,
+        "whisperx_import_seconds": None,
+        "pytorch_thread_setup_seconds": None,
+        "audio_decode_seconds": None,
+        "alignment_model_load_seconds": None,
+        "whisperx_align_seconds": None,
+        "word_mapping_and_reconciliation_seconds": None,
+        "output_processing_seconds": None,
+        "report_write_seconds": None,
+    }
     warnings: list[str] = []
     report: dict[str, Any] = {
         "total_words": 0,
         "successfully_aligned_words": 0,
         "missing_or_unreliable_words": 0,
         "alignment_duration_seconds": None,
+        "total_script_runtime_seconds": None,
+        "peak_working_set_mib": None,
+        "average_cpu_cores": None,
+        "stage_timings_seconds": stage_timings,
         "audio_duration_seconds": None,
         "processing_device": args.device,
+        "cpu_thread_count": None,
         "model_used": "WAV2VEC2_ASR_BASE_960H" if args.language == "en" else None,
         "warnings": warnings,
         "errors": [],
@@ -177,29 +197,42 @@ def main() -> int:
         if args.device == "cpu":
             # Limit this process before importing PyTorch/WhisperX or running any
             # eager tensor work. These are per-process settings, not system changes.
-            os.environ["OMP_NUM_THREADS"] = "2"
-            os.environ["MKL_NUM_THREADS"] = "2"
+            cpu_threads = max(1, int(os.environ.get("WHISPERX_CPU_THREADS", "2")))
+            report["cpu_thread_count"] = cpu_threads
+            os.environ["OMP_NUM_THREADS"] = str(cpu_threads)
+            os.environ["MKL_NUM_THREADS"] = str(cpu_threads)
+            stage_started = time.perf_counter()
             import torch
+            stage_timings["torch_import_seconds"] = round(time.perf_counter() - stage_started, 3)
 
-            torch.set_num_threads(2)
+            stage_started = time.perf_counter()
+            torch.set_num_threads(cpu_threads)
             torch.set_num_interop_threads(1)
+            stage_timings["pytorch_thread_setup_seconds"] = round(time.perf_counter() - stage_started, 3)
 
+        stage_started = time.perf_counter()
         import whisperx
         from whisperx.alignment import DEFAULT_ALIGN_MODELS_TORCH
+        stage_timings["whisperx_import_seconds"] = round(time.perf_counter() - stage_started, 3)
 
         model_name = DEFAULT_ALIGN_MODELS_TORCH.get(args.language)
         report["model_used"] = model_name
         if model_name is None:
             raise ValueError(f"No default WhisperX alignment model is available for language {args.language!r}.")
 
+        stage_started = time.perf_counter()
         audio = whisperx.load_audio(str(args.audio))
+        stage_timings["audio_decode_seconds"] = round(time.perf_counter() - stage_started, 3)
         duration = len(audio) / SAMPLE_RATE
         report["audio_duration_seconds"] = round(duration, 3)
         if duration <= 0:
             raise ValueError("Audio file decoded to zero samples.")
 
+        stage_started = time.perf_counter()
         model, metadata = whisperx.load_align_model(language_code=args.language, device=args.device)
+        stage_timings["alignment_model_load_seconds"] = round(time.perf_counter() - stage_started, 3)
         external_transcript = [{"start": 0.0, "end": duration, "text": alignment_text}]
+        stage_started = time.perf_counter()
         aligned = whisperx.align(
             external_transcript,
             model,
@@ -208,7 +241,9 @@ def main() -> int:
             args.device,
             interpolate_method="ignore",
         )
+        stage_timings["whisperx_align_seconds"] = round(time.perf_counter() - stage_started, 3)
 
+        stage_started = time.perf_counter()
         aligned_entries = aligned.get("word_segments", [])
         index_map, map_warnings = word_mapping(source_words, aligned_entries)
         warnings.extend(map_warnings)
@@ -249,12 +284,14 @@ def main() -> int:
         punctuation_only = sum(not token_key(word) for word in source_words)
         if punctuation_only:
             warnings.append(f"{punctuation_only} punctuation-only transcript token(s) were retained; review them in context.")
+        stage_timings["word_mapping_and_reconciliation_seconds"] = round(time.perf_counter() - stage_started, 3)
 
         # Keep only the compact word records needed by the writers/report. The
         # model and decoded waveform are no longer needed after alignment.
         del aligned_entries, index_map, aligned, audio, model, metadata, external_transcript
         gc.collect()
 
+        stage_started = time.perf_counter()
         write_json(args.output / "aligned.json", {
             "language": args.language,
             "audio_duration_seconds": round(duration, 3),
@@ -264,7 +301,17 @@ def main() -> int:
         (args.output / "aligned.srt").write_text(srt, encoding="utf-8")
         if omitted_cues:
             warnings.append(f"{omitted_cues} word(s) without reliable timing were not included in SRT cues because no cue time could be supplied safely.")
-        report["alignment_duration_seconds"] = round(time.perf_counter() - started, 3)
+        stage_timings["output_processing_seconds"] = round(time.perf_counter() - stage_started, 3)
+        report["alignment_duration_seconds"] = stage_timings["whisperx_align_seconds"]
+        # A first serialization measures report-writing cost. The final write
+        # persists that measurement and final runtime/resource values.
+        report_write_started = time.perf_counter()
+        write_json(args.output / "alignment-report.json", report)
+        stage_timings["report_write_seconds"] = round(time.perf_counter() - report_write_started, 3)
+        wall_seconds = time.perf_counter() - started
+        report["total_script_runtime_seconds"] = round(wall_seconds, 3)
+        report["peak_working_set_mib"] = peak_working_set_mib()
+        report["average_cpu_cores"] = average_cpu_cores(cpu_started, wall_seconds)
         write_json(args.output / "alignment-report.json", report)
         print(json.dumps({
             "output": str(args.output.resolve()),
@@ -274,8 +321,16 @@ def main() -> int:
         }, ensure_ascii=False))
         return 0
     except Exception as exc:
-        report["alignment_duration_seconds"] = round(time.perf_counter() - started, 3)
         report["errors"].append({"type": type(exc).__name__, "message": str(exc)})
+        report["alignment_duration_seconds"] = stage_timings["whisperx_align_seconds"]
+        report_write_started = time.perf_counter()
+        write_json(args.output / "alignment-report.json", report)
+        stage_timings["report_write_seconds"] = round(time.perf_counter() - report_write_started, 3)
+        wall_seconds = time.perf_counter() - started
+        report["total_script_runtime_seconds"] = round(wall_seconds, 3)
+        report["peak_working_set_mib"] = peak_working_set_mib()
+        report["average_cpu_cores"] = average_cpu_cores(cpu_started, wall_seconds)
+        report["stage_timings_seconds"] = stage_timings
         write_json(args.output / "alignment-report.json", report)
         print(f"Alignment failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
