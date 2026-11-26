@@ -135,3 +135,25 @@ it('applies category lesson date and pace filters to the eligible cohort', funct
         ->assertJsonPath('rows.data.0.student_id', $included->id)
         ->assertJsonPath('filters.lessons.0.id', $lesson->id);
 });
+
+it('filters transfer analysis by current batch for categories completed before assignment', function () {
+    $admin = transferAnalysisUser('admin', 'transfer-current-batch-admin@example.test');
+    $student = transferAnalysisUser('student', 'transfer-current-batch-student@example.test');
+    $batch = \App\Models\ZoomBatch::create(['name' => 'Current transfer batch', 'status' => 'active']);
+    \App\Models\ZoomBatchMembership::create([
+        'zoom_batch_id' => $batch->id,
+        'student_id' => $student->id,
+        'status' => 'active',
+        'joined_at' => now(),
+    ]);
+    $category = transferAnalysisCategory('Completed before batch assignment', 1);
+    completeTransferAnalysisCategory($student, $category);
+
+    $this->actingAs($admin)->getJson('/api/admin/reports?'.http_build_query([
+        'report' => 'transfers', 'batch_id' => $batch->id,
+    ]))->assertOk()
+        ->assertJsonPath('transfer_summary.eligible_students', 1)
+        ->assertJsonPath('rows.data.0.student_id', $student->id)
+        ->assertJsonPath('rows.data.0.batch_id', $batch->id)
+        ->assertJsonPath('rows.data.0.batch_name', $batch->name);
+});

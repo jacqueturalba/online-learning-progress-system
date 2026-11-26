@@ -7,7 +7,7 @@ use App\Models\StudentCategoryTransfer;
 use App\Models\StudentCategoryProgress;
 use App\Models\User;
 use App\Support\TransferEligibility;
-use App\Support\HistoricalBatchScope;
+use App\Support\CurrentBatchScope;
 use App\Services\ReportXlsxExporter;
 use Carbon\Carbon;
 use Illuminate\Database\Query\Builder;
@@ -155,8 +155,8 @@ class AdminTransferAnalysisController extends Controller
             })
             ->when($filters['pace_group'] ?? null, fn (Builder $query, $code) => $query->where('u.pace_group', $code));
 
-        HistoricalBatchScope::join($query, 'scp.student_id', 'COALESCE(scp.completed_at, scp.started_at)');
-        HistoricalBatchScope::filter($query, $filters['batch_id'] ?? null);
+        CurrentBatchScope::join($query, 'scp.student_id');
+        CurrentBatchScope::filter($query, $filters['batch_id'] ?? null);
 
         if (isset($filters['date_from'])) {
             $query->where('scp.completed_at', '>=', $filters['date_from'].' 00:00:00');

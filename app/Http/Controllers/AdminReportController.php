@@ -11,7 +11,7 @@ use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use App\Services\ReportXlsxExporter;
-use App\Support\HistoricalBatchScope;
+use App\Support\CurrentBatchScope;
 use Illuminate\Validation\ValidationException;
 
 class AdminReportController extends Controller
@@ -102,10 +102,10 @@ class AdminReportController extends Controller
             ->join('categories as c', 'c.id', '=', 'l.category_id')
             ->join('users as u', 'u.id', '=', 'p.student_id')
             ->where('u.role', 'student')->where('p.is_completed', true)->whereNotNull('p.completed_at');
-        HistoricalBatchScope::join($query, 'p.student_id', 'p.completed_at');
+        CurrentBatchScope::join($query, 'p.student_id');
         $this->applyCategory($query, $filters, 'l.category_id');
         $this->applyDates($query, $filters, 'p.completed_at');
-        HistoricalBatchScope::filter($query, $filters['batch_id'] ?? null);
+        CurrentBatchScope::filter($query, $filters['batch_id'] ?? null);
 
         return $query->groupBy('l.id', 'l.title', 'l.sort_order', 'l.category_id', 'c.name', 'report_batch_membership.zoom_batch_id', 'report_batch.name')
             ->orderBy('c.name')->orderBy('l.sort_order')->orderBy('l.id')
@@ -123,10 +123,10 @@ class AdminReportController extends Controller
             ->join('users as u', 'u.id', '=', 'p.student_id')
             ->leftJoin('pace_groups as pg', 'pg.code', '=', 'u.pace_group')
             ->where('u.role', 'student')->where('p.is_completed', true)->whereNotNull('p.completed_at');
-        HistoricalBatchScope::join($query, 'p.student_id', 'p.completed_at');
+        CurrentBatchScope::join($query, 'p.student_id');
         $this->applyCategory($query, $filters, 'l.category_id');
         $this->applyDates($query, $filters, 'p.completed_at');
-        HistoricalBatchScope::filter($query, $filters['batch_id'] ?? null);
+        CurrentBatchScope::filter($query, $filters['batch_id'] ?? null);
 
         return $query->groupBy('u.id', 'u.name', 'u.pseudocode', 'u.pace_group', 'pg.weekly_target', 'report_batch_membership.zoom_batch_id', 'report_batch.name')
             ->orderBy('u.name')->orderBy('u.id')->orderBy('report_batch.name')
@@ -156,10 +156,10 @@ class AdminReportController extends Controller
             })
             ->leftJoinSub(DB::table('lessons')->where('is_published', true)->select('category_id')->selectRaw('COUNT(*) as total_lessons')->groupBy('category_id'), 'lt', 'lt.category_id', '=', 'scp.category_id')
             ->where('u.role', 'student');
-        HistoricalBatchScope::join($query, 'scp.student_id', 'COALESCE(scp.started_at, scp.created_at)');
+        CurrentBatchScope::join($query, 'scp.student_id');
         $this->applyCategory($query, $filters, 'scp.category_id');
         $this->applyDates($query, $filters, 'scp.started_at');
-        HistoricalBatchScope::filter($query, $filters['batch_id'] ?? null);
+        CurrentBatchScope::filter($query, $filters['batch_id'] ?? null);
 
         return $query->orderBy('c.sort_order')->orderBy('c.id')->orderBy('u.name')->orderBy('u.id')->orderBy('report_batch.name')
             ->select(['scp.id', 'u.id as student_id', 'u.name as student_name', 'u.pseudocode', 'u.pace_group', 'pg.weekly_target', 'c.name as category_name'])
@@ -178,10 +178,10 @@ class AdminReportController extends Controller
             ->join('lessons as l', 'l.id', '=', 'r.lesson_id')
             ->join('categories as c', 'c.id', '=', 'l.category_id')
             ->where('u.role', 'student');
-        HistoricalBatchScope::join($query, 'r.student_id', 'r.submitted_at');
+        CurrentBatchScope::join($query, 'r.student_id');
         $this->applyCategory($query, $filters, 'l.category_id');
         $this->applyDates($query, $filters, 'r.submitted_at');
-        HistoricalBatchScope::filter($query, $filters['batch_id'] ?? null);
+        CurrentBatchScope::filter($query, $filters['batch_id'] ?? null);
 
         return $query->groupBy('c.id', 'c.name', 'l.id', 'l.title', 'u.id', 'u.name', 'u.pseudocode', 'report_batch_membership.zoom_batch_id', 'report_batch.name')
             ->orderBy('c.name')->orderBy('l.title')->orderBy('u.name')->orderBy('u.id')->orderBy('report_batch.name')
